@@ -1,0 +1,32 @@
+{
+  "name": "calorie-agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20.6"
+  },
+  "scripts": {
+    "dev": "concurrently -n agent,bot -c blue,green \"npm:dev:agent\" \"npm:dev:bot\"",
+    "dev:agent": "flue dev --target node --env .env",
+    "dev:bot": "tsx watch --env-file=.env src/index.ts",
+    "build": "tsc && flue build --target node",
+    "start": "concurrently -n agent,bot \"node --env-file=.env dist/server.mjs\" \"node --env-file=.env dist/index.js\"",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@flue/cli": "^0.6.1",
+    "@flue/runtime": "^0.6.1",
+    "@upstash/box": "^0.4.1",
+    "@upstash/redis": "^1.38.0",
+    "@upstash/vector": "^1.2.3",
+    "grammy": "^1.30.0",
+    "valibot": "^1.4.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "concurrently": "^9.2.1",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}
