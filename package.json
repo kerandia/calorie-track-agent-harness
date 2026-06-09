@@ -12,7 +12,7 @@
     "dev:bot": "tsx watch --env-file=.env src/index.ts",
     "build": "tsc && flue build --target node",
     "start": "concurrently -n agent,bot \"node --env-file=.env dist/server.mjs\" \"node --env-file=.env dist/index.js\"",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.flue.json"
   },
   "dependencies": {
     "@flue/cli": "^0.6.1",

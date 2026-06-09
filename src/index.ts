@@ -10,6 +10,8 @@ if (!token) {
 
 const channel = new TelegramChannel(token);
 
+const FLUE_TIMEOUT_MS = 180_000;
+
 channel.onMessage(async (msg, reply) => {
   const imageNote = msg.image ? " [+image]" : "";
   console.log(`[${msg.tenantId}]${imageNote} ${msg.text || "(no caption)"}`);
@@ -22,11 +24,16 @@ channel.onMessage(async (msg, reply) => {
         text: msg.text,
         image: msg.image,
       }),
+      signal: AbortSignal.timeout(FLUE_TIMEOUT_MS),
     });
     if (!res.ok) {
       const body = await res.text();
       console.error(`Flue ${res.status}: ${body}`);
-      await reply("Something went wrong on my side. Try again in a moment.");
+      const friendly =
+        res.status >= 500
+          ? "The model just hiccuped on me. Try again in a moment — if it keeps happening the free model is probably overloaded."
+          : "Something went wrong on my side. Try again in a moment.";
+      await reply(friendly);
       return;
     }
     const runId = res.headers.get("x-flue-run-id") ?? "?";
@@ -44,8 +51,14 @@ channel.onMessage(async (msg, reply) => {
     console.log(`[${msg.tenantId}] <- (run ${runId}) ${preview}`);
     await reply(replyText);
   } catch (err) {
-    console.error("Failed to reach Flue:", err);
-    await reply("I can't reach my brain right now. One sec...");
+    const isTimeout =
+      err instanceof DOMException && err.name === "TimeoutError";
+    console.error(`Failed to reach Flue${isTimeout ? " (timeout)" : ""}:`, err);
+    await reply(
+      isTimeout
+        ? "Took too long to think — the model's probably overloaded. Try again."
+        : "I can't reach my brain right now. Try again in a sec.",
+    );
   }
 });
 

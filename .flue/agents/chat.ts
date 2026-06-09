@@ -2,16 +2,34 @@ import type { FlueContext, ToolDef } from "@flue/runtime";
 import { Type } from "@flue/runtime";
 import * as v from "valibot";
 import {
+  deleteRecentMeal,
+  getActiveAssumptions,
   getDailyTotals,
+  getMealsAwaitingFeedback,
   getMealsByDateRange,
   getMealsByIds,
+  getMissingRequiredFields,
+  getMostRecentMeal,
+  getProfile,
   getRecentMeals,
+  isOnboarded,
   logMeal,
+  noteAssumption,
+  recordMealFeedback,
+  summarizeProfile,
   todayUTC,
+  updateAssumptionStatus,
+  updateProfile,
+  updateRecentMeal,
   type MealRecord,
 } from "../lib/redis.js";
-import { semanticSearchMeals, upsertMealVector } from "../lib/vector.js";
+import {
+  deleteMealVector,
+  semanticSearchMeals,
+  upsertMealVector,
+} from "../lib/vector.js";
 import { createSessionBox, type SessionBox } from "../lib/box.js";
+import { describeImage } from "../lib/vision.js";
 
 export const triggers = { webhook: true };
 
@@ -25,6 +43,14 @@ const InputSchema = v.object({
     }),
   ),
 });
+
+const formatElapsed = (seconds: number): string => {
+  if (seconds < 60) return `${seconds}s`;
+  const m = Math.floor(seconds / 60);
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  return `${h}h${m % 60 ? ` ${m % 60}m` : ""}`;
+};
 
 const formatMeals = (meals: MealRecord[]): string => {
   if (meals.length === 0) return "No meals found.";
@@ -46,13 +72,13 @@ export default async function chat({ init, payload }: FlueContext) {
   const input = v.parse(InputSchema, payload);
   const today = todayUTC();
 
-  let _box: SessionBox | null = null;
+  const boxRef: { current: SessionBox | null } = { current: null };
   const getBox = async (): Promise<SessionBox> => {
-    if (!_box) {
+    if (!boxRef.current) {
       console.log(`[chat] creating ephemeral box for ${input.tenantId}`);
-      _box = await createSessionBox(input.tenantId);
+      boxRef.current = await createSessionBox(input.tenantId);
     }
-    return _box;
+    return boxRef.current;
   };
 
   const logMealTool: ToolDef = {
@@ -108,7 +134,7 @@ export default async function chat({ init, payload }: FlueContext) {
       } catch (err) {
         console.warn("[chat] vector upsert failed:", err);
       }
-      return `Logged "${args.text}" (${Math.round(args.kcal)} kcal). Today's total: ${r.dailyKcal} kcal.`;
+      return `Logged "${args.text}" (${Math.round(args.kcal)} kcal, id: ${r.mealId}). Today's total: ${r.dailyKcal} kcal.`;
     },
   };
 
@@ -195,6 +221,209 @@ export default async function chat({ init, payload }: FlueContext) {
     },
   };
 
+  const recordFeedbackTool: ToolDef = {
+    name: "record_feedback",
+    description:
+      "Record how the user felt after a specific meal. Use AFTER the user answers a 'how did you feel?' follow-up. Pass meal_id 'recent' to attach to the most recently logged meal, or the actual id returned by log_meal.",
+    parameters: Type.Object({
+      meal_id: Type.String({
+        description: "Meal id from log_meal, or the literal string 'recent'.",
+      }),
+      sentiment: Type.Union([
+        Type.Literal("good"),
+        Type.Literal("neutral"),
+        Type.Literal("bad"),
+      ]),
+      note: Type.Optional(
+        Type.String({ description: "Brief reason or symptoms." }),
+      ),
+    }),
+    execute: async (args) => {
+      const targetId = args.meal_id === "recent" ? null : args.meal_id;
+      const r = await recordMealFeedback(
+        input.tenantId,
+        targetId,
+        args.sentiment,
+        args.note,
+      );
+      if (!r) return "No meal found to attach feedback to.";
+      return `Feedback recorded for "${r.text}": ${args.sentiment}${args.note ? ` — ${args.note}` : ""}.`;
+    },
+  };
+
+  const noteAssumptionTool: ToolDef = {
+    name: "note_assumption",
+    description:
+      "Record an INFERENCE about the user that goes beyond their explicit profile (e.g. 'tends to skip breakfast on weekdays', 'feels better on high-protein meals', 'is in a cutting phase'). For explicit facts like allergies, preferences, goals — use update_profile instead. One assumption per call.",
+    parameters: Type.Object({
+      text: Type.String({
+        description: "One sentence describing the inference.",
+      }),
+      confidence: Type.Union([
+        Type.Literal("low"),
+        Type.Literal("medium"),
+        Type.Literal("high"),
+      ]),
+    }),
+    execute: async (args) => {
+      const id = await noteAssumption(
+        input.tenantId,
+        args.text,
+        args.confidence,
+      );
+      return `Assumption #${id} recorded: "${args.text}" [${args.confidence}].`;
+    },
+  };
+
+  const updateAssumptionStatusTool: ToolDef = {
+    name: "update_assumption_status",
+    description:
+      "Mark a previously-noted assumption as 'confirmed' (user agreed) or 'rejected' (user pushed back). Use when the user reacts to an assumption you've stated or that's listed in the context.",
+    parameters: Type.Object({
+      id: Type.String({ description: "The assumption id, e.g. 'a1b2c3d4'." }),
+      status: Type.Union([
+        Type.Literal("confirmed"),
+        Type.Literal("rejected"),
+      ]),
+    }),
+    execute: async (args) => {
+      const r = await updateAssumptionStatus(
+        input.tenantId,
+        args.id,
+        args.status,
+      );
+      if (!r) return `No assumption with id ${args.id} found.`;
+      return `Marked assumption "${r.text}" as ${args.status}.`;
+    },
+  };
+
+  const updateProfileTool: ToolDef = {
+    name: "update_profile",
+    description:
+      "Update the user's profile. Use during onboarding to capture demographics/preferences AND any time during normal conversation when the user reveals something new about themselves ('I'm vegan now', 'I'm allergic to peanuts', 'my goal is 1800 kcal'). Pass only the fields being set or changed.",
+    parameters: Type.Object({
+      name: Type.Optional(Type.String()),
+      age: Type.Optional(Type.Number()),
+      sex: Type.Optional(
+        Type.Union([
+          Type.Literal("male"),
+          Type.Literal("female"),
+          Type.Literal("other"),
+        ]),
+      ),
+      height_cm: Type.Optional(Type.Number()),
+      weight_kg: Type.Optional(Type.Number()),
+      activity_level: Type.Optional(
+        Type.Union([
+          Type.Literal("sedentary"),
+          Type.Literal("light"),
+          Type.Literal("moderate"),
+          Type.Literal("active"),
+          Type.Literal("very_active"),
+        ]),
+      ),
+      daily_kcal_goal: Type.Optional(
+        Type.Number({
+          description:
+            "Explicit daily calorie target. Omit to let the system auto-compute from age/sex/height/weight/activity (Mifflin-St Jeor).",
+        }),
+      ),
+      dietary_preferences: Type.Optional(
+        Type.Array(Type.String(), {
+          description:
+            "e.g. ['vegan'], ['keto'], ['mediterranean']. Empty array clears.",
+        }),
+      ),
+      allergies: Type.Optional(
+        Type.Array(Type.String(), {
+          description: "e.g. ['gluten', 'nuts']. Empty array clears.",
+        }),
+      ),
+      likes: Type.Optional(Type.Array(Type.String())),
+      dislikes: Type.Optional(Type.Array(Type.String())),
+    }),
+    execute: async (args) => {
+      const updated = await updateProfile(input.tenantId, args);
+      const summary = summarizeProfile(updated);
+      const justOnboarded =
+        !onboarded && isOnboarded(updated)
+          ? " User has just completed onboarding."
+          : "";
+      return `Profile updated. Current: ${summary || "(empty)"}.${justOnboarded}`;
+    },
+  };
+
+  const getProfileTool: ToolDef = {
+    name: "get_profile",
+    description:
+      "Get the user's current profile (name, demographics, preferences, allergies, kcal target). Use when the user asks what you know about them, or before personalizing a recommendation.",
+    parameters: Type.Object({}),
+    execute: async () => {
+      const p = await getProfile(input.tenantId);
+      return summarizeProfile(p) || "Profile is empty.";
+    },
+  };
+
+  const updateRecentMealTool: ToolDef = {
+    name: "update_recent_meal",
+    description:
+      "Update the user's MOST RECENTLY logged meal. Use this ONLY when the user corrects something you (mis)identified in your previous turn (e.g. 'no, it's actually red lentil waffle, not a rice cake', 'that's not a frittata, it's an omelet'). Pass only the fields that change. Do NOT use this preemptively — only on explicit user correction.",
+    parameters: Type.Object({
+      text: Type.Optional(
+        Type.String({ description: "Corrected food description." }),
+      ),
+      kcal: Type.Optional(
+        Type.Number({ description: "Corrected calories (whole number)." }),
+      ),
+      protein_g: Type.Optional(Type.Number()),
+      carb_g: Type.Optional(Type.Number()),
+      fat_g: Type.Optional(Type.Number()),
+      meal_type: Type.Optional(
+        Type.Union([
+          Type.Literal("breakfast"),
+          Type.Literal("lunch"),
+          Type.Literal("dinner"),
+          Type.Literal("snack"),
+        ]),
+      ),
+    }),
+    execute: async (args) => {
+      const r = await updateRecentMeal(input.tenantId, args);
+      if (!r) return "No recent meal to update.";
+      if (args.text) {
+        try {
+          await upsertMealVector(input.tenantId, r.mealId, args.text, {
+            text: args.text,
+            kcal: r.newKcal,
+            meal_type: args.meal_type,
+            logged_at: new Date().toISOString(),
+            date: r.date,
+          });
+        } catch (err) {
+          console.warn("[chat] vector reupsert failed:", err);
+        }
+      }
+      return `Updated last meal to "${r.text}" (${r.oldKcal} kcal → ${r.newKcal} kcal). Today's total: ${r.dailyKcal} kcal.`;
+    },
+  };
+
+  const deleteRecentMealTool: ToolDef = {
+    name: "delete_recent_meal",
+    description:
+      "Delete the user's MOST RECENTLY logged meal. Use when the user says 'wait, that wasn't food', 'I didn't actually eat that', 'ignore the last log', or 'undo'. Do NOT use unless the user explicitly wants the entry removed.",
+    parameters: Type.Object({}),
+    execute: async () => {
+      const r = await deleteRecentMeal(input.tenantId);
+      if (!r) return "Nothing to delete.";
+      try {
+        await deleteMealVector(input.tenantId, r.mealId);
+      } catch (err) {
+        console.warn("[chat] vector delete failed:", err);
+      }
+      return `Deleted "${r.text}" (${r.kcalRemoved} kcal removed from ${r.date}).`;
+    },
+  };
+
   const runShellTool: ToolDef = {
     name: "run_shell",
     description:
@@ -229,32 +458,113 @@ export default async function chat({ init, payload }: FlueContext) {
   };
 
   const harness = await init({
-    model: "openrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+    model: "nebius/MiniMaxAI/MiniMax-M2.5",
     tools: [
       logMealTool,
+      updateRecentMealTool,
+      deleteRecentMealTool,
       queryMealsTool,
       getDailyTotalsTool,
+      recordFeedbackTool,
+      noteAssumptionTool,
+      updateAssumptionStatusTool,
+      updateProfileTool,
+      getProfileTool,
       runShellTool,
       runCodeTool,
     ],
   });
   const session = await harness.session(input.tenantId);
 
-  const images = input.image
-    ? [
-        {
-          type: "image" as const,
-          data: input.image.base64,
-          mimeType: input.image.mimeType,
-        },
-      ]
-    : undefined;
+  let imageDescription: string | undefined;
+  if (input.image) {
+    const visionModel =
+      process.env.VISION_MODEL ?? "google/gemma-4-26b-a4b-it:free";
+    try {
+      imageDescription = await describeImage(input.image, visionModel);
+      console.log(
+        `[chat] vision (${visionModel}): ${imageDescription.slice(0, 120)}`,
+      );
+    } catch (err) {
+      console.warn("[chat] vision call failed:", err);
+    }
+  }
 
-  const userPart = input.image
-    ? input.text.trim()
-      ? `User (telegram id: ${input.tenantId}) sent an image with caption: "${input.text}"`
-      : `User (telegram id: ${input.tenantId}) sent an image with no caption. Identify the food, estimate kcal/macros, and log it via log_meal.`
-    : `User (telegram id: ${input.tenantId}) says: "${input.text}"`;
+  const profile = await getProfile(input.tenantId);
+  const profileSummary = summarizeProfile(profile);
+  const onboarded = isOnboarded(profile);
+  const missingFields = getMissingRequiredFields(profile);
+
+  const now = new Date();
+  let recentContext = "";
+  try {
+    const recent = await getMostRecentMeal(input.tenantId);
+    if (recent?.logged_at) {
+      const elapsedMs = now.getTime() - Date.parse(recent.logged_at);
+      if (elapsedMs >= 0 && elapsedMs < 24 * 60 * 60 * 1000) {
+        const elapsed = formatElapsed(Math.floor(elapsedMs / 1000));
+        recentContext = `Last log: "${recent.text}" (${recent.kcal} kcal), ${elapsed} ago.`;
+        if (elapsedMs < 180 * 1000) {
+          recentContext +=
+            ` That was JUST NOW. If the user's current message restates, refines, or breaks down that same item (lists ingredients, gives a different name, adjusts portion), call update_recent_meal — do NOT log a new meal.`;
+        }
+      }
+    }
+  } catch (err) {
+    console.warn("[chat] recent-meal context fetch failed:", err);
+  }
+
+  let pendingFeedback: MealRecord[] = [];
+  let activeAssumptions: Awaited<ReturnType<typeof getActiveAssumptions>> = [];
+  try {
+    [pendingFeedback, activeAssumptions] = await Promise.all([
+      getMealsAwaitingFeedback(
+        input.tenantId,
+        15 * 60 * 1000,
+        12 * 60 * 60 * 1000,
+        1,
+      ),
+      getActiveAssumptions(input.tenantId, 5),
+    ]);
+  } catch (err) {
+    console.warn("[chat] context fetch failed:", err);
+  }
+
+  const segments: string[] = [`Now: ${now.toISOString()}.`];
+  if (profileSummary) segments.push(`Profile: ${profileSummary}.`);
+  if (activeAssumptions.length > 0) {
+    segments.push(
+      `Active assumptions about user: ` +
+        activeAssumptions
+          .map((a) => `[${a.id}] ${a.text} (${a.confidence})`)
+          .join("; ") +
+        `.`,
+    );
+  }
+  if (!onboarded) {
+    segments.push(
+      `[ONBOARDING NEEDED] User is not fully onboarded. Still missing: ${missingFields.join(", ")}. Ask 1-2 short, friendly questions per turn to gather these. Save answers via update_profile immediately.`,
+    );
+  }
+  if (pendingFeedback.length > 0) {
+    const m = pendingFeedback[0]!;
+    const ageMin = Math.floor((now.getTime() - Date.parse(m.logged_at)) / 60000);
+    segments.push(
+      `[PENDING FEEDBACK] Meal "${m.text}" (id ${m.id}) was logged ${ageMin}m ago and you haven't asked how it felt. If this turn has a natural opening (user isn't actively logging new food or asking something else), ask casually — only ONCE. When they answer, call record_feedback with meal_id "${m.id}". Skip if the moment doesn't fit.`,
+    );
+  }
+  if (recentContext) segments.push(recentContext);
+  if (imageDescription) {
+    segments.push(`Image attached. Vision description: "${imageDescription}".`);
+    segments.push(
+      input.text.trim()
+        ? `User caption: "${input.text}"`
+        : `No caption — identify the food and call log_meal (unless this is a correction per the rule above).`,
+    );
+  } else {
+    segments.push(`User says: "${input.text}"`);
+  }
+  const userPart = segments.join("\n");
 
   try {
     const { data } = await session.prompt(
@@ -265,10 +575,40 @@ export default async function chat({ init, payload }: FlueContext) {
         `For data you've never seen in this session (older meals, totals you haven't checked yet), use the tools to look it up.\n\n` +
         `If an image is attached, identify the food and call log_meal with your best kcal/macro estimate. ` +
         `If the image is not food, describe what you see briefly and skip logging.\n\n` +
+        `CORRECTIONS — important: If the user pushes back on something you identified or estimated in a previous turn ` +
+        `("no, it's actually X", "that's not Y, it's Z", "you missed the rice", "it was a smaller portion"), treat it ` +
+        `as a correction to your most recently logged meal:\n` +
+        `- Substitution / re-estimate → call update_recent_meal with only the corrected fields.\n` +
+        `- "wasn't food" / "didn't eat that" / "undo" → call delete_recent_meal.\n` +
+        `\n` +
+        `TIME SIGNAL: each turn includes a "Last log: ... N ago" line. If that elapsed time is short (under a couple minutes) ` +
+        `and the user's new message looks like a restatement, ingredient breakdown, or different name for what you just logged, ` +
+        `that is almost certainly a correction — call update_recent_meal, do NOT create a new meal entry. ` +
+        `An ingredient list sent right after a vague vision identification is the canonical example.\n` +
+        `\n` +
+        `Do all of this without asking for permission; just fix and confirm what changed.\n\n` +
+        `ONBOARDING: When the user message context contains "[ONBOARDING NEEDED]", the user is new. ` +
+        `Walk them through a friendly, conversational questionnaire — 1-2 short questions per turn, not a survey dump. ` +
+        `Required to complete onboarding: name, age, sex, height_cm, weight_kg. ` +
+        `Nice-to-haves to gather over multiple turns: activity_level, dietary_preferences, allergies, likes, dislikes. ` +
+        `If they want to skip, respect it and gather missing info naturally over time. ` +
+        `Always save answers via update_profile as you get them.\n\n` +
+        `PERSONALIZATION: Once you have profile info (allergies, preferences, kcal target), USE it. ` +
+        `Don't suggest gluten-containing foods to a gluten-free user. Compare meals against their daily kcal target. ` +
+        `If during a normal conversation the user reveals something new about themselves ("I'm vegan now", "I dropped 3kg"), call update_profile.\n\n` +
+        `PROACTIVE FEEDBACK: If the context shows a [PENDING FEEDBACK] marker, you logged a meal a while ago without asking how the user felt. Ask once, casually, only on a turn with a natural opening — don't interrupt new logging or unrelated questions. When the user answers, call record_feedback with the meal id from the marker.\n\n` +
+        `ASSUMPTIONS: When you infer something about the user that goes beyond their profile (e.g. "feels better on high-protein meals", "tends to under-eat on weekdays"), call note_assumption with a confidence level. The active assumptions are listed in the context block — refer to them when relevant. When the user reacts to an assumption ("yeah that's right" / "no I don't"), call update_assumption_status with the assumption's id to confirm or reject. Don't double-record profile facts (allergies, explicit preferences, goals) as assumptions — those go in update_profile.\n\n` +
         `Tools:\n` +
         `- log_meal: when the user describes food they ate (or sends a food image). Estimate kcal/macros if not provided.\n` +
+        `- update_recent_meal: when the user corrects what you logged last turn (most common after a photo identification).\n` +
+        `- delete_recent_meal: when the user says the last log was wrong/not food/undo.\n` +
         `- query_meals: when the user asks about ANY past meals.\n` +
         `- get_daily_totals: when the user asks about totals.\n` +
+        `- update_profile: capture onboarding answers or any personal info revealed in conversation.\n` +
+        `- get_profile: read the current profile (use when the user asks what you know about them).\n` +
+        `- record_feedback: attach a good/neutral/bad sentiment + optional note to a logged meal after the user tells you how they felt.\n` +
+        `- note_assumption: record an inference about the user that's beyond explicit profile facts.\n` +
+        `- update_assumption_status: confirm or reject an active assumption when the user reacts.\n` +
         `- run_shell(cmd): one-shot shell command in a Linux sandbox. Use for installs (pip/apk), curl, etc.\n` +
         `- run_code(language, code): run Python/JS/TS in the sandbox. Use for analysis, charts, parsing, multi-step computation. The sandbox has no direct DB access — fetch data via query_meals first, then pass it into the code.\n\n` +
         `Prefer the dedicated tools (log_meal, query_meals, get_daily_totals) for normal logging and lookups. ` +
@@ -279,14 +619,13 @@ export default async function chat({ init, payload }: FlueContext) {
         result: v.object({
           reply: v.string(),
         }),
-        images,
       },
     );
     return data;
   } finally {
-    if (_box) {
+    if (boxRef.current) {
       try {
-        await _box.delete();
+        await boxRef.current.delete();
         console.log(`[chat] deleted ephemeral box`);
       } catch (err) {
         console.warn("[chat] box delete failed:", err);

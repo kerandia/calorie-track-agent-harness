@@ -33,6 +33,13 @@ export type SemanticMatch = {
   metadata: MealMetadata;
 };
 
+export async function deleteMealVector(
+  tenantId: string,
+  mealId: string,
+): Promise<void> {
+  await getIndex().namespace(tenantId).delete([mealId]);
+}
+
 export async function semanticSearchMeals(
   tenantId: string,
   query: string,
