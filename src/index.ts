@@ -19,7 +19,7 @@ channel.onMessage(async (msg, reply) => {
   if (cmd === "/login" || cmd === "/dashboard" || cmd === "/web") {
     try {
       const loginToken = await createLoginToken(msg.tenantId);
-      const link = `${dashboardUrl}/api/auth/code?token=${loginToken}`;
+      const link = `${dashboardUrl}/login/confirm?token=${loginToken}`;
       console.log(`[${msg.tenantId}] issued dashboard login link`);
       await reply(
         `Here's your dashboard login link (valid 10 minutes, one-time):\n${link}`,

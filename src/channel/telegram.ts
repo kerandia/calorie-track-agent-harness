@@ -41,7 +41,11 @@ export class TelegramChannel implements Channel {
           messageId: ctx.message.message_id,
         },
         async (text) => {
-          await ctx.reply(text);
+          // Previews disabled: Telegram's preview crawler GETs any URL in a
+          // message, which would consume one-time login links.
+          await ctx.reply(text, {
+            link_preview_options: { is_disabled: true },
+          });
         },
       );
     });
