@@ -1,7 +1,9 @@
 import { TelegramChannel } from "./channel/telegram.js";
+import { createLoginToken } from "./login.js";
 
 const token = process.env.TELEGRAM_BOT_TOKEN;
 const flueUrl = process.env.FLUE_URL ?? "http://localhost:3583";
+const dashboardUrl = process.env.DASHBOARD_URL ?? "http://localhost:3100";
 
 if (!token) {
   console.error("Missing TELEGRAM_BOT_TOKEN. Copy .env.example to .env and fill it in.");
@@ -13,6 +15,22 @@ const channel = new TelegramChannel(token);
 const FLUE_TIMEOUT_MS = 180_000;
 
 channel.onMessage(async (msg, reply) => {
+  const cmd = msg.text.trim().toLowerCase();
+  if (cmd === "/login" || cmd === "/dashboard" || cmd === "/web") {
+    try {
+      const loginToken = await createLoginToken(msg.tenantId);
+      const link = `${dashboardUrl}/api/auth/code?token=${loginToken}`;
+      console.log(`[${msg.tenantId}] issued dashboard login link`);
+      await reply(
+        `Here's your dashboard login link (valid 10 minutes, one-time):\n${link}`,
+      );
+    } catch (err) {
+      console.error("Failed to issue login token:", err);
+      await reply("Couldn't generate a login link right now. Try again in a sec.");
+    }
+    return;
+  }
+
   const imageNote = msg.image ? " [+image]" : "";
   console.log(`[${msg.tenantId}]${imageNote} ${msg.text || "(no caption)"}`);
   try {

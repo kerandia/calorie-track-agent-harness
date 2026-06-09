@@ -93,6 +93,17 @@ export async function getDayTotals(
   return out;
 }
 
+/** Consume a one-time login token minted by the bot. Returns the tenant id
+ * (telegram id) and deletes the token, or null if missing/expired. */
+export async function consumeLoginToken(token: string): Promise<string | null> {
+  if (!/^[a-f0-9]{16,64}$/.test(token)) return null;
+  const key = `login:${token}`;
+  const tenantId = await redis().get<string>(key);
+  if (!tenantId) return null;
+  await redis().del(key);
+  return String(tenantId);
+}
+
 export async function getProfile(tenantId: string): Promise<UserProfile> {
   const r =
     (await redis().hgetall<Record<string, string>>(k(tenantId, "profile"))) ??
