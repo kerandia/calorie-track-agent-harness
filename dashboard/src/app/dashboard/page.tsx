@@ -71,6 +71,10 @@ export default async function Dashboard({
     }
   }
   const avgKcal = daysLogged ? Math.round(kcalSum / daysLogged) : 0;
+  const maxDayKcal = Math.max(
+    1,
+    ...dates.map((d) => totals.get(d)?.kcal ?? 0),
+  );
 
   return (
     <div className="container">
@@ -114,20 +118,31 @@ export default async function Dashboard({
           month={month}
           totals={totals}
           goal={goal}
+          selectedDate={selectedDate}
         />
-        <div
-          className="row"
-          style={{ marginTop: 14, fontSize: 12 }}
-        >
-          {dates
-            .filter((d) => totals.get(d)?.meal_count)
-            .slice(-10)
-            .map((d) => (
-              <a key={d} href={`/dashboard?y=${year}&m=${month}&d=${d}`}>
-                {d.slice(8)}
-              </a>
-            ))}
-          <span className="muted">· click a day number above the list to view it</span>
+        <div className="section-title">Daily trend</div>
+        <div className="trend">
+          {dates.map((d) => {
+            const t = totals.get(d);
+            const kcal = t?.kcal ?? 0;
+            const h = kcal ? Math.max(3, (kcal / maxDayKcal) * 100) : 3;
+            const color = !kcal
+              ? "var(--panel-2)"
+              : goal && kcal <= goal
+                ? "var(--good)"
+                : goal
+                  ? "var(--over)"
+                  : "var(--accent)";
+            return (
+              <a
+                key={d}
+                href={`/dashboard?y=${year}&m=${month}&d=${d}`}
+                className="trend-bar"
+                style={{ height: `${h}%`, background: color }}
+                title={`${d}: ${kcal} kcal`}
+              />
+            );
+          })}
         </div>
       </div>
 
@@ -175,7 +190,9 @@ export default async function Dashboard({
                     {a.text}
                     {a.status === "confirmed" ? " ✅" : ""}
                   </span>
-                  <span className="muted">{a.confidence}</span>
+                  <span className="pill" style={{ fontSize: 11 }}>
+                    {a.confidence}
+                  </span>
                 </div>
               ))}
             </div>

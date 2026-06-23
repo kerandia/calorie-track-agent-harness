@@ -5,6 +5,7 @@ type Props = {
   month: number; // 0-11
   totals: Map<string, DayTotals>;
   goal: number | undefined;
+  selectedDate: string;
 };
 
 const DOW = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
@@ -14,10 +15,8 @@ const ymd = (y: number, m: number, d: number) => `${y}-${pad(m + 1)}-${pad(d)}`;
 
 /**
  * Apple-Watch-style calorie calendar. Each day is colored by how the day's
- * intake compares to the goal:
- *   under goal (deficit)  → green (deeper = bigger deficit)
- *   at/over goal (surplus) → red (deeper = bigger surplus)
- *   no data                → neutral
+ * intake compares to the goal: under goal (deficit) → green; over → red;
+ * no data → neutral. Cells are clickable to select that day.
  */
 function cellStyle(
   total: DayTotals | undefined,
@@ -32,20 +31,23 @@ function cellStyle(
   const diff = total.kcal - goal; // negative = deficit (good)
   const ratio = Math.max(-1, Math.min(1, diff / goal));
   if (ratio <= 0) {
-    // deficit → green, opacity scales with magnitude
-    const alpha = 0.25 + Math.min(0.6, Math.abs(ratio) * 1.2);
-    return { background: `rgba(63,185,80,${alpha})`, color: "#fff" };
+    const alpha = 0.28 + Math.min(0.62, Math.abs(ratio) * 1.2);
+    return { background: `rgba(52,211,153,${alpha})`, color: "#06231a" };
   }
-  // surplus → red
-  const alpha = 0.25 + Math.min(0.6, ratio * 1.2);
-  return { background: `rgba(248,81,73,${alpha})`, color: "#fff" };
+  const alpha = 0.28 + Math.min(0.62, ratio * 1.2);
+  return { background: `rgba(248,81,73,${alpha})`, color: "#2a0b0a" };
 }
 
-export default function CalorieCalendar({ year, month, totals, goal }: Props) {
+export default function CalorieCalendar({
+  year,
+  month,
+  totals,
+  goal,
+  selectedDate,
+}: Props) {
   const first = new Date(Date.UTC(year, month, 1));
   const daysInMonth = new Date(Date.UTC(year, month + 1, 0)).getUTCDate();
-  // JS getUTCDay: 0=Sun..6=Sat; we want Mon-first.
-  const startOffset = (first.getUTCDay() + 6) % 7;
+  const startOffset = (first.getUTCDay() + 6) % 7; // Mon-first
 
   const cells: (number | null)[] = [];
   for (let i = 0; i < startOffset; i++) cells.push(null);
@@ -64,7 +66,7 @@ export default function CalorieCalendar({ year, month, totals, goal }: Props) {
           display: "flex",
           justifyContent: "space-between",
           alignItems: "baseline",
-          marginBottom: 10,
+          marginBottom: 12,
         }}
       >
         <strong style={{ fontSize: 16 }}>
@@ -74,7 +76,7 @@ export default function CalorieCalendar({ year, month, totals, goal }: Props) {
           {goal ? `goal ${goal} kcal/day` : "set a goal for deficit coloring"}
         </span>
       </div>
-      <div className="cal-grid" style={{ marginBottom: 6 }}>
+      <div className="cal-grid" style={{ marginBottom: 7 }}>
         {DOW.map((d) => (
           <div key={d} className="cal-dow">
             {d}
@@ -83,24 +85,24 @@ export default function CalorieCalendar({ year, month, totals, goal }: Props) {
       </div>
       <div className="cal-grid">
         {cells.map((d, i) => {
-          if (d === null) return <div key={`e${i}`} />;
+          if (d === null) return <div key={`e${i}`} className="cal-cell is-empty" />;
           const date = ymd(year, month, d);
           const total = totals.get(date);
+          const isSelected = date === selectedDate;
           const title = total
             ? `${date}: ${total.kcal} kcal${goal ? ` / ${goal}` : ""} (${total.meal_count} meals)`
             : `${date}: no log`;
           return (
-            <div
+            <a
               key={date}
-              className="cal-cell"
+              href={`/dashboard?y=${year}&m=${month}&d=${date}`}
+              className={`cal-cell${isSelected ? " is-selected" : ""}`}
               style={cellStyle(total, goal)}
               title={title}
             >
-              <span style={{ fontWeight: 600 }}>{d}</span>
-              {total ? (
-                <span style={{ fontSize: 9, opacity: 0.9 }}>{total.kcal}</span>
-              ) : null}
-            </div>
+              <span className="cal-day">{d}</span>
+              {total ? <span className="cal-kcal">{total.kcal}</span> : null}
+            </a>
           );
         })}
       </div>
