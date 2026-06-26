@@ -40,10 +40,15 @@ export type LogMealResult = {
 export async function logMeal(
   tenantId: string,
   entry: MealEntry,
+  dateOverride?: string,
 ): Promise<LogMealResult> {
   const mealId = crypto.randomUUID();
-  const ts = Date.now();
-  const date = todayUTC();
+  const date = dateOverride ?? todayUTC();
+  const isToday = date === todayUTC();
+  // For a past/explicit date, anchor the timestamp at noon UTC of that day so
+  // date-range queries land it on the right day; for today, use the real now.
+  const ts = isToday ? Date.now() : Date.parse(`${date}T12:00:00.000Z`);
+  const loggedAt = isToday ? entry.logged_at : `${date}T12:00:00.000Z`;
 
   const mealKey = k(tenantId, "meal", mealId);
   const indexKey = k(tenantId, "meals");
@@ -57,7 +62,7 @@ export async function logMeal(
     carb_g: Math.round(entry.carb_g ?? 0),
     fat_g: Math.round(entry.fat_g ?? 0),
     meal_type: entry.meal_type ?? "",
-    logged_at: entry.logged_at,
+    logged_at: loggedAt,
   });
   pipe.zadd(indexKey, { score: ts, member: mealId });
   pipe.hincrby(dailyKey, "kcal", Math.round(entry.kcal));
@@ -302,85 +307,131 @@ export type UpdateMealPatch = {
   carb_g?: number;
   fat_g?: number;
   meal_type?: MealType;
+  /** Move the meal to this date (YYYY-MM-DD). Adjusts totals on both days. */
+  date?: string;
 };
 
-export type UpdateRecentResult = {
+export type UpdateMealResult = {
   mealId: string;
   date: string;
+  movedFrom?: string;
   oldKcal: number;
   newKcal: number;
   dailyKcal: number;
   text: string;
 };
 
-export async function updateRecentMeal(
+/** Resolve "recent" (or null) to the most-recent meal id, else use the id. */
+export async function resolveMealId(
   tenantId: string,
+  mealId: string | null,
+): Promise<string | null> {
+  if (mealId && mealId !== "recent") return mealId;
+  const recent = await getMostRecentMeal(tenantId);
+  return recent?.id ?? null;
+}
+
+export async function updateMealById(
+  tenantId: string,
+  mealId: string,
   patch: UpdateMealPatch,
-): Promise<UpdateRecentResult | null> {
-  const existing = await getMostRecentMeal(tenantId);
+): Promise<UpdateMealResult | null> {
+  const [existing] = await getMealsByIds(tenantId, [mealId]);
   if (!existing) return null;
 
-  const date = existing.logged_at.slice(0, 10);
-  const dailyKey = k(tenantId, "day", date);
-  const mealKey = k(tenantId, "meal", existing.id);
+  const oldDate = existing.logged_at.slice(0, 10);
+  const newDate = patch.date ?? oldDate;
+  const moving = newDate !== oldDate;
 
-  const existingProtein = existing.protein_g ?? 0;
-  const existingCarb = existing.carb_g ?? 0;
-  const existingFat = existing.fat_g ?? 0;
+  const exP = existing.protein_g ?? 0;
+  const exC = existing.carb_g ?? 0;
+  const exF = existing.fat_g ?? 0;
 
   const merged = {
     text: patch.text ?? existing.text,
     kcal: Math.round(patch.kcal ?? existing.kcal),
-    protein_g: Math.round(patch.protein_g ?? existingProtein),
-    carb_g: Math.round(patch.carb_g ?? existingCarb),
-    fat_g: Math.round(patch.fat_g ?? existingFat),
+    protein_g: Math.round(patch.protein_g ?? exP),
+    carb_g: Math.round(patch.carb_g ?? exC),
+    fat_g: Math.round(patch.fat_g ?? exF),
     meal_type: patch.meal_type ?? existing.meal_type,
   };
 
-  const dKcal = merged.kcal - existing.kcal;
-  const dProtein = merged.protein_g - existingProtein;
-  const dCarb = merged.carb_g - existingCarb;
-  const dFat = merged.fat_g - existingFat;
-
+  const mealKey = k(tenantId, "meal", mealId);
   const pipe = getRedis().pipeline();
-  pipe.hset(mealKey, {
-    text: merged.text,
-    kcal: merged.kcal,
-    protein_g: merged.protein_g,
-    carb_g: merged.carb_g,
-    fat_g: merged.fat_g,
-    meal_type: merged.meal_type ?? "",
-  });
-  if (dKcal !== 0) pipe.hincrby(dailyKey, "kcal", dKcal);
-  if (dProtein !== 0) pipe.hincrby(dailyKey, "protein_g", dProtein);
-  if (dCarb !== 0) pipe.hincrby(dailyKey, "carb_g", dCarb);
-  if (dFat !== 0) pipe.hincrby(dailyKey, "fat_g", dFat);
+
+  if (moving) {
+    // Remove the meal's full nutrition from the old day, add to the new day.
+    const oldDaily = k(tenantId, "day", oldDate);
+    const newDaily = k(tenantId, "day", newDate);
+    if (existing.kcal) pipe.hincrby(oldDaily, "kcal", -existing.kcal);
+    if (exP) pipe.hincrby(oldDaily, "protein_g", -exP);
+    if (exC) pipe.hincrby(oldDaily, "carb_g", -exC);
+    if (exF) pipe.hincrby(oldDaily, "fat_g", -exF);
+    pipe.hincrby(oldDaily, "meal_count", -1);
+    if (merged.kcal) pipe.hincrby(newDaily, "kcal", merged.kcal);
+    if (merged.protein_g) pipe.hincrby(newDaily, "protein_g", merged.protein_g);
+    if (merged.carb_g) pipe.hincrby(newDaily, "carb_g", merged.carb_g);
+    if (merged.fat_g) pipe.hincrby(newDaily, "fat_g", merged.fat_g);
+    pipe.hincrby(newDaily, "meal_count", 1);
+    const newTs = Date.parse(`${newDate}T12:00:00.000Z`);
+    pipe.zadd(k(tenantId, "meals"), { score: newTs, member: mealId });
+    pipe.hset(mealKey, {
+      text: merged.text,
+      kcal: merged.kcal,
+      protein_g: merged.protein_g,
+      carb_g: merged.carb_g,
+      fat_g: merged.fat_g,
+      meal_type: merged.meal_type ?? "",
+      logged_at: `${newDate}T12:00:00.000Z`,
+    });
+  } else {
+    const dailyKey = k(tenantId, "day", oldDate);
+    pipe.hset(mealKey, {
+      text: merged.text,
+      kcal: merged.kcal,
+      protein_g: merged.protein_g,
+      carb_g: merged.carb_g,
+      fat_g: merged.fat_g,
+      meal_type: merged.meal_type ?? "",
+    });
+    const dKcal = merged.kcal - existing.kcal;
+    if (dKcal !== 0) pipe.hincrby(dailyKey, "kcal", dKcal);
+    if (merged.protein_g - exP !== 0)
+      pipe.hincrby(dailyKey, "protein_g", merged.protein_g - exP);
+    if (merged.carb_g - exC !== 0)
+      pipe.hincrby(dailyKey, "carb_g", merged.carb_g - exC);
+    if (merged.fat_g - exF !== 0)
+      pipe.hincrby(dailyKey, "fat_g", merged.fat_g - exF);
+  }
   await pipe.exec();
 
-  const dailyKcalRaw = await getRedis().hget<string>(dailyKey, "kcal");
-  const dailyKcal = Number(dailyKcalRaw ?? merged.kcal);
-
+  const dailyKcalRaw = await getRedis().hget<string>(
+    k(tenantId, "day", newDate),
+    "kcal",
+  );
   return {
-    mealId: existing.id,
-    date,
+    mealId,
+    date: newDate,
+    movedFrom: moving ? oldDate : undefined,
     oldKcal: existing.kcal,
     newKcal: merged.kcal,
-    dailyKcal,
+    dailyKcal: Number(dailyKcalRaw ?? merged.kcal),
     text: merged.text,
   };
 }
 
-export type DeleteRecentResult = {
+export type DeleteMealResult = {
   mealId: string;
   text: string;
   kcalRemoved: number;
   date: string;
 };
 
-export async function deleteRecentMeal(
+export async function deleteMealById(
   tenantId: string,
-): Promise<DeleteRecentResult | null> {
-  const existing = await getMostRecentMeal(tenantId);
+  mealId: string,
+): Promise<DeleteMealResult | null> {
+  const [existing] = await getMealsByIds(tenantId, [mealId]);
   if (!existing) return null;
 
   const date = existing.logged_at.slice(0, 10);

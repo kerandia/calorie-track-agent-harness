@@ -2,7 +2,7 @@ import type { FlueContext, ToolDef } from "@flue/runtime";
 import { Type } from "@flue/runtime";
 import * as v from "valibot";
 import {
-  deleteRecentMeal,
+  deleteMealById,
   getActiveAssumptions,
   getDailyTotals,
   getMealsAwaitingFeedback,
@@ -16,11 +16,12 @@ import {
   logMeal,
   noteAssumption,
   recordMealFeedback,
+  resolveMealId,
   summarizeProfile,
   todayUTC,
   updateAssumptionStatus,
+  updateMealById,
   updateProfile,
-  updateRecentMeal,
   type MealRecord,
 } from "../lib/redis.js";
 import {
@@ -57,7 +58,8 @@ const formatMeals = (meals: MealRecord[]): string => {
   return meals
     .map((m, i) => {
       const kind = m.meal_type ? `, ${m.meal_type}` : "";
-      return `${i + 1}. ${m.text} — ${m.kcal} kcal (${m.logged_at}${kind})`;
+      const day = m.logged_at.slice(0, 10);
+      return `${i + 1}. ${m.text} — ${m.kcal} kcal (${day}${kind}) [id: ${m.id}]`;
     })
     .join("\n");
 };
@@ -111,30 +113,41 @@ export default async function chat({ init, payload }: FlueContext) {
           { description: "Meal type if obvious from context." },
         ),
       ),
+      date: Type.Optional(
+        Type.String({
+          description:
+            "Date this meal was eaten, YYYY-MM-DD. ONLY set this when the user says the meal was on a day OTHER than today (e.g. 'yesterday', 'on Monday'). Omit for meals eaten today. Compute the concrete date from today's date in context.",
+        }),
+      ),
     }),
     execute: async (args) => {
       const loggedAt = new Date().toISOString();
-      const r = await logMeal(input.tenantId, {
-        text: args.text,
-        kcal: args.kcal,
-        protein_g: args.protein_g,
-        carb_g: args.carb_g,
-        fat_g: args.fat_g,
-        meal_type: args.meal_type,
-        logged_at: loggedAt,
-      });
+      const r = await logMeal(
+        input.tenantId,
+        {
+          text: args.text,
+          kcal: args.kcal,
+          protein_g: args.protein_g,
+          carb_g: args.carb_g,
+          fat_g: args.fat_g,
+          meal_type: args.meal_type,
+          logged_at: loggedAt,
+        },
+        args.date,
+      );
       try {
         await upsertMealVector(input.tenantId, r.mealId, args.text, {
           text: args.text,
           kcal: Math.round(args.kcal),
           meal_type: args.meal_type,
-          logged_at: loggedAt,
+          logged_at: r.date === today ? loggedAt : `${r.date}T12:00:00.000Z`,
           date: r.date,
         });
       } catch (err) {
         console.warn("[chat] vector upsert failed:", err);
       }
-      return `Logged "${args.text}" (${Math.round(args.kcal)} kcal, id: ${r.mealId}). Today's total: ${r.dailyKcal} kcal.`;
+      const dayLabel = r.date === today ? "Today's" : `${r.date}`;
+      return `Logged "${args.text}" (${Math.round(args.kcal)} kcal, id: ${r.mealId}) on ${r.date}. ${dayLabel} total: ${r.dailyKcal} kcal.`;
     },
   };
 
@@ -364,11 +377,17 @@ export default async function chat({ init, payload }: FlueContext) {
     },
   };
 
-  const updateRecentMealTool: ToolDef = {
-    name: "update_recent_meal",
+  const updateMealTool: ToolDef = {
+    name: "update_meal",
     description:
-      "Update the user's MOST RECENTLY logged meal. Use this ONLY when the user corrects something you (mis)identified in your previous turn (e.g. 'no, it's actually red lentil waffle, not a rice cake', 'that's not a frittata, it's an omelet'). Pass only the fields that change. Do NOT use this preemptively — only on explicit user correction.",
+      "Edit a logged meal: fix its description/calories/macros, OR move it to a different day. " +
+      "Pass meal_id 'recent' for the meal you just logged, or an actual id from log_meal / query_meals. " +
+      "To MOVE a meal to another day (e.g. user says 'that was yesterday, not today'), set `date` — totals on both days are corrected automatically. " +
+      "Only pass the fields that change; keep the meal's identity (don't rewrite the food unless the user is correcting what it was).",
     parameters: Type.Object({
+      meal_id: Type.String({
+        description: "Meal id from log_meal/query_meals, or 'recent'.",
+      }),
       text: Type.Optional(
         Type.String({ description: "Corrected food description." }),
       ),
@@ -386,34 +405,58 @@ export default async function chat({ init, payload }: FlueContext) {
           Type.Literal("snack"),
         ]),
       ),
+      date: Type.Optional(
+        Type.String({
+          description:
+            "Move the meal to this day (YYYY-MM-DD). Use when the user says it was on a different day.",
+        }),
+      ),
     }),
     execute: async (args) => {
-      const r = await updateRecentMeal(input.tenantId, args);
-      if (!r) return "No recent meal to update.";
-      if (args.text) {
+      const id = await resolveMealId(input.tenantId, args.meal_id);
+      if (!id) return "No meal found to update.";
+      const r = await updateMealById(input.tenantId, id, {
+        text: args.text,
+        kcal: args.kcal,
+        protein_g: args.protein_g,
+        carb_g: args.carb_g,
+        fat_g: args.fat_g,
+        meal_type: args.meal_type,
+        date: args.date,
+      });
+      if (!r) return "No meal found to update.";
+      if (args.text || args.date) {
         try {
-          await upsertMealVector(input.tenantId, r.mealId, args.text, {
-            text: args.text,
+          await upsertMealVector(input.tenantId, r.mealId, r.text, {
+            text: r.text,
             kcal: r.newKcal,
             meal_type: args.meal_type,
-            logged_at: new Date().toISOString(),
+            logged_at: `${r.date}T12:00:00.000Z`,
             date: r.date,
           });
         } catch (err) {
           console.warn("[chat] vector reupsert failed:", err);
         }
       }
-      return `Updated last meal to "${r.text}" (${r.oldKcal} kcal → ${r.newKcal} kcal). Today's total: ${r.dailyKcal} kcal.`;
+      const moved = r.movedFrom ? ` (moved ${r.movedFrom} → ${r.date})` : "";
+      return `Updated "${r.text}"${moved}. ${r.date} total: ${r.dailyKcal} kcal.`;
     },
   };
 
-  const deleteRecentMealTool: ToolDef = {
-    name: "delete_recent_meal",
+  const deleteMealTool: ToolDef = {
+    name: "delete_meal",
     description:
-      "Delete the user's MOST RECENTLY logged meal. Use when the user says 'wait, that wasn't food', 'I didn't actually eat that', 'ignore the last log', or 'undo'. Do NOT use unless the user explicitly wants the entry removed.",
-    parameters: Type.Object({}),
-    execute: async () => {
-      const r = await deleteRecentMeal(input.tenantId);
+      "Delete a logged meal. Pass meal_id 'recent' for the meal you just logged, or an actual id from query_meals. " +
+      "Use when the user says 'that wasn't food', 'I didn't eat that', 'remove it', or 'undo'.",
+    parameters: Type.Object({
+      meal_id: Type.String({
+        description: "Meal id from log_meal/query_meals, or 'recent'.",
+      }),
+    }),
+    execute: async (args) => {
+      const id = await resolveMealId(input.tenantId, args.meal_id);
+      if (!id) return "Nothing to delete.";
+      const r = await deleteMealById(input.tenantId, id);
       if (!r) return "Nothing to delete.";
       try {
         await deleteMealVector(input.tenantId, r.mealId);
@@ -461,8 +504,8 @@ export default async function chat({ init, payload }: FlueContext) {
     model: "nebius/MiniMaxAI/MiniMax-M2.5",
     tools: [
       logMealTool,
-      updateRecentMealTool,
-      deleteRecentMealTool,
+      updateMealTool,
+      deleteMealTool,
       queryMealsTool,
       getDailyTotalsTool,
       recordFeedbackTool,
@@ -503,10 +546,10 @@ export default async function chat({ init, payload }: FlueContext) {
       const elapsedMs = now.getTime() - Date.parse(recent.logged_at);
       if (elapsedMs >= 0 && elapsedMs < 24 * 60 * 60 * 1000) {
         const elapsed = formatElapsed(Math.floor(elapsedMs / 1000));
-        recentContext = `Last log: "${recent.text}" (${recent.kcal} kcal), ${elapsed} ago.`;
+        recentContext = `Last log: "${recent.text}" (${recent.kcal} kcal, id ${recent.id}), ${elapsed} ago.`;
         if (elapsedMs < 180 * 1000) {
           recentContext +=
-            ` That was JUST NOW. If the user's current message restates, refines, or breaks down that same item (lists ingredients, gives a different name, adjusts portion), call update_recent_meal — do NOT log a new meal.`;
+            ` That was JUST NOW. If the user's current message restates, refines, or breaks down that same item (lists ingredients, gives a different name, adjusts portion), call update_meal with meal_id "recent" — do NOT log a new meal.`;
         }
       }
     }
@@ -575,15 +618,19 @@ export default async function chat({ init, payload }: FlueContext) {
         `For data you've never seen in this session (older meals, totals you haven't checked yet), use the tools to look it up.\n\n` +
         `If an image is attached, identify the food and call log_meal with your best kcal/macro estimate. ` +
         `If the image is not food, describe what you see briefly and skip logging.\n\n` +
-        `CORRECTIONS — important: If the user pushes back on something you identified or estimated in a previous turn ` +
-        `("no, it's actually X", "that's not Y, it's Z", "you missed the rice", "it was a smaller portion"), treat it ` +
-        `as a correction to your most recently logged meal:\n` +
-        `- Substitution / re-estimate → call update_recent_meal with only the corrected fields.\n` +
-        `- "wasn't food" / "didn't eat that" / "undo" → call delete_recent_meal.\n` +
+        `DATES: meals default to TODAY. If the user says a meal was on another day ("yesterday", "on Monday", a date), ` +
+        `pass the concrete YYYY-MM-DD as log_meal's \`date\` (compute it from today's date in context). Do NOT log it to today and then fix it.\n\n` +
+        `CORRECTIONS — important: If the user pushes back on something you logged ` +
+        `("no, it's actually X", "that's not Y, it's Z", "you missed the rice", "it was a smaller portion", "that was yesterday not today"), ` +
+        `EDIT the existing meal — do NOT delete and re-log (that loses the meal). Use update_meal:\n` +
+        `- Wrong food/calories → update_meal with the corrected fields, keeping the SAME meal (don't swap it for a different food).\n` +
+        `- Wrong day → update_meal with \`date\` set to move it (totals on both days are fixed automatically).\n` +
+        `- "wasn't food" / "didn't eat that" / "undo" → delete_meal.\n` +
+        `Use meal_id "recent" for the meal you just logged; for an older meal, query_meals first to get its id, then act on that id.\n` +
         `\n` +
-        `TIME SIGNAL: each turn includes a "Last log: ... N ago" line. If that elapsed time is short (under a couple minutes) ` +
+        `TIME SIGNAL: each turn includes a "Last log: ... N ago" line with its id. If that elapsed time is short (under a couple minutes) ` +
         `and the user's new message looks like a restatement, ingredient breakdown, or different name for what you just logged, ` +
-        `that is almost certainly a correction — call update_recent_meal, do NOT create a new meal entry. ` +
+        `that is almost certainly a correction — call update_meal with meal_id "recent", do NOT create a new meal entry. ` +
         `An ingredient list sent right after a vague vision identification is the canonical example.\n` +
         `\n` +
         `Do all of this without asking for permission; just fix and confirm what changed.\n\n` +
@@ -599,10 +646,10 @@ export default async function chat({ init, payload }: FlueContext) {
         `PROACTIVE FEEDBACK: If the context shows a [PENDING FEEDBACK] marker, you logged a meal a while ago without asking how the user felt. Ask once, casually, only on a turn with a natural opening — don't interrupt new logging or unrelated questions. When the user answers, call record_feedback with the meal id from the marker.\n\n` +
         `ASSUMPTIONS: When you infer something about the user that goes beyond their profile (e.g. "feels better on high-protein meals", "tends to under-eat on weekdays"), call note_assumption with a confidence level. The active assumptions are listed in the context block — refer to them when relevant. When the user reacts to an assumption ("yeah that's right" / "no I don't"), call update_assumption_status with the assumption's id to confirm or reject. Don't double-record profile facts (allergies, explicit preferences, goals) as assumptions — those go in update_profile.\n\n` +
         `Tools:\n` +
-        `- log_meal: when the user describes food they ate (or sends a food image). Estimate kcal/macros if not provided.\n` +
-        `- update_recent_meal: when the user corrects what you logged last turn (most common after a photo identification).\n` +
-        `- delete_recent_meal: when the user says the last log was wrong/not food/undo.\n` +
-        `- query_meals: when the user asks about ANY past meals.\n` +
+        `- log_meal: when the user describes food they ate (or sends a food image). Estimate kcal/macros if not provided. Set \`date\` only for meals from another day.\n` +
+        `- update_meal: edit or move a logged meal (meal_id "recent" or an id from query_meals). Use for corrections and "that was yesterday".\n` +
+        `- delete_meal: remove a logged meal (meal_id "recent" or an id) when it wasn't food / didn't happen / undo.\n` +
+        `- query_meals: when the user asks about ANY past meals. Returns each meal's id — use those ids with update_meal/delete_meal.\n` +
         `- get_daily_totals: when the user asks about totals.\n` +
         `- update_profile: capture onboarding answers or any personal info revealed in conversation.\n` +
         `- get_profile: read the current profile (use when the user asks what you know about them).\n` +
