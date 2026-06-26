@@ -12,25 +12,27 @@ if (!token) {
 
 const channel = new TelegramChannel(token);
 
-const FLUE_TIMEOUT_MS = 180_000;
+const FLUE_TIMEOUT_MS = 240_000;
 
-channel.onMessage(async (msg, reply) => {
-  const cmd = msg.text.trim().toLowerCase();
-  if (cmd === "/login" || cmd === "/dashboard" || cmd === "/web") {
-    try {
-      const loginToken = await createLoginToken(msg.tenantId);
-      const link = `${dashboardUrl}/login/confirm?token=${loginToken}`;
-      console.log(`[${msg.tenantId}] issued dashboard login link`);
-      await reply(
-        `Here's your dashboard login link (valid 10 minutes, one-time):\n${link}`,
-      );
-    } catch (err) {
-      console.error("Failed to issue login token:", err);
-      await reply("Couldn't generate a login link right now. Try again in a sec.");
-    }
-    return;
-  }
+// Serialize turns per tenant. Flue's session.prompt throws if two prompts run
+// on the same session at once, and rapid-fire messages from one user would
+// otherwise race. Each tenant gets a promise chain; a new message waits for
+// that tenant's previous turn to finish before starting.
+const tenantQueues = new Map<string, Promise<unknown>>();
+function enqueue(tenantId: string, task: () => Promise<void>): Promise<void> {
+  const prev = tenantQueues.get(tenantId) ?? Promise.resolve();
+  const next = prev.catch(() => {}).then(task);
+  tenantQueues.set(tenantId, next);
+  void next.finally(() => {
+    if (tenantQueues.get(tenantId) === next) tenantQueues.delete(tenantId);
+  });
+  return next;
+}
 
+async function handleAgentTurn(
+  msg: { tenantId: string; text: string; messageId: number; image?: unknown },
+  reply: (text: string) => Promise<void>,
+): Promise<void> {
   const imageNote = msg.image ? " [+image]" : "";
   console.log(`[${msg.tenantId}]${imageNote} ${msg.text || "(no caption)"}`);
   try {
@@ -49,7 +51,7 @@ channel.onMessage(async (msg, reply) => {
       console.error(`Flue ${res.status}: ${body}`);
       const friendly =
         res.status >= 500
-          ? "The model just hiccuped on me. Try again in a moment — if it keeps happening the free model is probably overloaded."
+          ? "The model just hiccuped on me. Try again in a moment."
           : "Something went wrong on my side. Try again in a moment.";
       await reply(friendly);
       return;
@@ -69,15 +71,34 @@ channel.onMessage(async (msg, reply) => {
     console.log(`[${msg.tenantId}] <- (run ${runId}) ${preview}`);
     await reply(replyText);
   } catch (err) {
-    const isTimeout =
-      err instanceof DOMException && err.name === "TimeoutError";
+    const isTimeout = err instanceof DOMException && err.name === "TimeoutError";
     console.error(`Failed to reach Flue${isTimeout ? " (timeout)" : ""}:`, err);
     await reply(
       isTimeout
-        ? "Took too long to think — the model's probably overloaded. Try again."
+        ? "That took too long — try again in a moment."
         : "I can't reach my brain right now. Try again in a sec.",
     );
   }
+}
+
+channel.onMessage(async (msg, reply) => {
+  const cmd = msg.text.trim().toLowerCase();
+  if (cmd === "/login" || cmd === "/dashboard" || cmd === "/web") {
+    try {
+      const loginToken = await createLoginToken(msg.tenantId);
+      const link = `${dashboardUrl}/login/confirm?token=${loginToken}`;
+      console.log(`[${msg.tenantId}] issued dashboard login link`);
+      await reply(
+        `Here's your dashboard login link (valid 10 minutes, one-time):\n${link}`,
+      );
+    } catch (err) {
+      console.error("Failed to issue login token:", err);
+      await reply("Couldn't generate a login link right now. Try again in a sec.");
+    }
+    return;
+  }
+
+  await enqueue(msg.tenantId, () => handleAgentTurn(msg, reply));
 });
 
 const shutdown = async (signal: string) => {

@@ -1,4 +1,4 @@
-import { Bot } from "grammy";
+import { Bot, type Context } from "grammy";
 
 export type IncomingImage = {
   base64: string;
@@ -30,23 +30,46 @@ export class TelegramChannel implements Channel {
     this.bot = new Bot(token);
   }
 
+  /** Show a "typing…" indicator (refreshed every 4s) while `run` is working. */
+  private async withTyping(
+    ctx: Context,
+    run: () => Promise<void>,
+  ): Promise<void> {
+    const chatId = ctx.chat?.id;
+    let iv: ReturnType<typeof setInterval> | undefined;
+    if (chatId != null) {
+      const send = () => {
+        void ctx.api.sendChatAction(chatId, "typing").catch(() => {});
+      };
+      send();
+      iv = setInterval(send, 4000);
+    }
+    try {
+      await run();
+    } finally {
+      if (iv) clearInterval(iv);
+    }
+  }
+
   onMessage(handler: MessageHandler): void {
     this.bot.on("message:text", async (ctx) => {
       const tenantId = ctx.from?.id != null ? String(ctx.from.id) : "";
       if (!tenantId) return;
-      await handler(
-        {
-          tenantId,
-          text: ctx.message.text,
-          messageId: ctx.message.message_id,
-        },
-        async (text) => {
-          // Previews disabled: Telegram's preview crawler GETs any URL in a
-          // message, which would consume one-time login links.
-          await ctx.reply(text, {
-            link_preview_options: { is_disabled: true },
-          });
-        },
+      await this.withTyping(ctx, () =>
+        handler(
+          {
+            tenantId,
+            text: ctx.message.text,
+            messageId: ctx.message.message_id,
+          },
+          async (text) => {
+            // Previews disabled: Telegram's preview crawler GETs any URL in a
+            // message, which would consume one-time login links.
+            await ctx.reply(text, {
+              link_preview_options: { is_disabled: true },
+            });
+          },
+        ),
       );
     });
 
@@ -74,16 +97,18 @@ export class TelegramChannel implements Channel {
         const buffer = Buffer.from(await res.arrayBuffer());
         const base64 = buffer.toString("base64");
 
-        await handler(
-          {
-            tenantId,
-            text: ctx.message.caption ?? "",
-            messageId: ctx.message.message_id,
-            image: { base64, mimeType: "image/jpeg" },
-          },
-          async (text) => {
-            await ctx.reply(text);
-          },
+        await this.withTyping(ctx, () =>
+          handler(
+            {
+              tenantId,
+              text: ctx.message.caption ?? "",
+              messageId: ctx.message.message_id,
+              image: { base64, mimeType: "image/jpeg" },
+            },
+            async (text) => {
+              await ctx.reply(text);
+            },
+          ),
         );
       } catch (err) {
         console.error("photo handler error:", err);

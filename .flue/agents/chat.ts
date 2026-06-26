@@ -31,6 +31,7 @@ import {
 } from "../lib/vector.js";
 import { createSessionBox, type SessionBox } from "../lib/box.js";
 import { describeImage } from "../lib/vision.js";
+import { redisSessionStore } from "../lib/sessionStore.js";
 
 export const triggers = { webhook: true };
 
@@ -502,6 +503,7 @@ export default async function chat({ init, payload }: FlueContext) {
 
   const harness = await init({
     model: "nebius/MiniMaxAI/MiniMax-M2.5",
+    persist: redisSessionStore,
     tools: [
       logMealTool,
       updateMealTool,
