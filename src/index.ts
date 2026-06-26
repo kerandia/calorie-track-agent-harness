@@ -88,5 +88,43 @@ const shutdown = async (signal: string) => {
 process.on("SIGINT", () => shutdown("SIGINT"));
 process.on("SIGTERM", () => shutdown("SIGTERM"));
 
-console.log(`Telegram bot starting (long-polling); Flue at ${flueUrl}`);
-await channel.start();
+// Don't let a stray rejection take the whole process down — log and keep going.
+process.on("unhandledRejection", (err) => {
+  console.error("unhandledRejection:", err);
+});
+
+// Long-polling is fragile during deploys: Cloud Run briefly runs the old and
+// new revision together, so both poll Telegram and the loser gets a 409
+// "terminated by other getUpdates". Instead of crashing, retry until the old
+// revision drains and we win the poll.
+let stopping = false;
+const origShutdown = shutdown;
+const wrappedShutdown = async (signal: string) => {
+  stopping = true;
+  await origShutdown(signal);
+};
+process.removeAllListeners("SIGINT");
+process.removeAllListeners("SIGTERM");
+process.on("SIGINT", () => wrappedShutdown("SIGINT"));
+process.on("SIGTERM", () => wrappedShutdown("SIGTERM"));
+
+async function runBot() {
+  for (let attempt = 1; !stopping; attempt++) {
+    try {
+      console.log(`Telegram bot starting (long-polling); Flue at ${flueUrl}`);
+      await channel.start(); // resolves only on graceful stop
+      return;
+    } catch (err) {
+      if (stopping) return;
+      console.error(`Bot polling failed (attempt ${attempt}), retrying in 5s:`, err);
+      try {
+        await channel.stop();
+      } catch {
+        /* ignore */
+      }
+      await new Promise((r) => setTimeout(r, 5000));
+    }
+  }
+}
+
+await runBot();

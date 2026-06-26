@@ -8,6 +8,13 @@ FROM node:24-slim
 
 WORKDIR /app
 
+# procps provides `ps`, which concurrently's --kill-others needs to tear down
+# the process tree. Without it, any process exit triggers `spawn ps ENOENT`
+# and an unhandled crash instead of a clean shutdown.
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends procps \
+  && rm -rf /var/lib/apt/lists/*
+
 # Install all deps (build needs tsc + flue cli; concurrently runs both procs)
 COPY package.json package-lock.json ./
 RUN npm ci
