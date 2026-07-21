@@ -21,6 +21,7 @@
     "@upstash/redis": "^1.38.0",
     "@upstash/vector": "^1.2.3",
     "grammy": "^1.30.0",
+    "hono": "^4.12.31",
     "valibot": "^1.4.0"
   },
   "devDependencies": {
