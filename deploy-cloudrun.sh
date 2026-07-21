@@ -66,6 +66,7 @@ echo "Deploying '$SERVICE' to Cloud Run ($REGION, scale-to-zero)…"
 gcloud run deploy "$SERVICE" \
   --source . \
   --region "$REGION" \
+  --cpu-throttling \
   --min-instances=0 \
   --max-instances=1 \
   --memory=1Gi \
