@@ -1,10 +1,11 @@
 import { redirect } from "next/navigation";
 import { getSessionTenantId } from "@/lib/auth";
-import ManifestoWall from "@/components/ManifestoWall";
+import ManifestoField from "@/components/ManifestoField";
 
-// Full-viewport typographic manifesto landing (nell.ai-style). The wave
-// travels THROUGH the text (letters stretch/duplicate at the crest and heal
-// behind it) — see ManifestoWall. Previous conventional landing: /classic.
+// Full-viewport typographic manifesto landing (nell.ai spirit) driven by a
+// real particle system: each word is a body with a home spring, wind drag,
+// and soft-contact repulsion — words flow toward each other but can never
+// touch (see ManifestoField). Previous conventional landing: /classic.
 
 const BOT = process.env.NEXT_PUBLIC_TELEGRAM_BOT_USERNAME || "Sezo_AI_bot";
 const TG_URL = `https://t.me/${BOT}`;
@@ -23,7 +24,7 @@ export default async function Landing() {
       </a>
 
       <main className="m-viewport">
-        <ManifestoWall tgUrl={TG_URL} />
+        <ManifestoField tgUrl={TG_URL} />
         <div className="m-wind m-wind-1" aria-hidden="true" />
         <div className="m-wind m-wind-2" aria-hidden="true" />
       </main>
