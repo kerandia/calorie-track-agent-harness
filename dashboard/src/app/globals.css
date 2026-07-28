@@ -302,19 +302,19 @@ a.cal-cell:hover {
 }
 @keyframes m-sway {
   0% {
-    transform: translateY(0) rotate(0deg);
+    transform: translate(0, 0) rotate(0deg);
   }
   25% {
-    transform: translateY(-14px) rotate(-0.5deg);
+    transform: translate(-4px, -5px) rotate(-0.25deg);
   }
   50% {
-    transform: translateY(4px) rotate(0.2deg);
+    transform: translate(3px, 2px) rotate(0.1deg);
   }
   75% {
-    transform: translateY(14px) rotate(0.55deg);
+    transform: translate(5px, 4px) rotate(0.25deg);
   }
   100% {
-    transform: translateY(0) rotate(0deg);
+    transform: translate(0, 0) rotate(0deg);
   }
 }
 .m-col-0 { --sway-dur: 11s;   animation-delay: -0s; }
