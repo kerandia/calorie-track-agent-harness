@@ -3,7 +3,9 @@ import { getSessionTenantId } from "@/lib/auth";
 
 // Full-viewport typographic manifesto landing (nell.ai-style): a wall of
 // low-contrast text fills the screen; the CTAs are bright highlights embedded
-// IN the text mass. The previous conventional landing is kept at /classic.
+// IN the text mass. Motion = wind: columns sway out of phase, bright words
+// bob independently, and light bands sweep across the field.
+// The previous conventional landing is kept at /classic.
 
 const BOT = process.env.NEXT_PUBLIC_TELEGRAM_BOT_USERNAME || "Sezo_AI_bot";
 const TG_URL = `https://t.me/${BOT}`;
@@ -51,44 +53,55 @@ function lcg(seed: number): () => number {
 }
 
 type Token =
-  | { t: "w"; v: string; hi: boolean }
+  | { t: "w"; v: string; hi: boolean; phase: number }
   | { t: "cta"; v: string; href: string; primary: boolean; external: boolean };
 
-function buildWall(): Token[] {
+const COLUMNS = 12;
+const WORDS_PER_COLUMN = 215;
+
+function buildColumns(): Token[][] {
   const rand = lcg(20260728);
-  const tokens: Token[] = [];
-  const target = 2400; // words — enough to overfill a large viewport
-  let words = 0;
-  while (words < target) {
-    const s = SENTENCES[Math.floor(rand() * SENTENCES.length)]!;
-    for (const w of s.split(" ")) {
-      tokens.push({ t: "w", v: w, hi: rand() < 0.045 });
-      words++;
+  const cols: Token[][] = [];
+  for (let c = 0; c < COLUMNS; c++) {
+    const col: Token[] = [];
+    let words = 0;
+    while (words < WORDS_PER_COLUMN) {
+      const s = SENTENCES[Math.floor(rand() * SENTENCES.length)]!;
+      for (const w of s.split(" ")) {
+        col.push({
+          t: "w",
+          v: w,
+          hi: rand() < 0.045,
+          phase: Math.floor(rand() * 6),
+        });
+        words++;
+      }
     }
+    cols.push(col);
   }
-  // Embed the CTAs inside the text mass.
-  tokens.splice(Math.floor(tokens.length * 0.38), 0, {
+  // Embed the CTAs inside the text mass (columns 3 and 7, mid-height).
+  cols[3]!.splice(Math.floor(cols[3]!.length * 0.45), 0, {
     t: "cta",
     v: "START ON TELEGRAM →",
     href: TG_URL,
     primary: true,
     external: true,
   });
-  tokens.splice(Math.floor(tokens.length * 0.62), 0, {
+  cols[7]!.splice(Math.floor(cols[7]!.length * 0.55), 0, {
     t: "cta",
     v: "LOGIN TO DASHBOARD →",
     href: "/login",
     primary: false,
     external: false,
   });
-  return tokens;
+  return cols;
 }
 
 export default async function Landing() {
   const tenantId = await getSessionTenantId();
   if (tenantId) redirect("/dashboard");
 
-  const wall = buildWall();
+  const columns = buildColumns();
 
   return (
     <div className="mani">
@@ -101,25 +114,33 @@ export default async function Landing() {
 
       <main className="m-viewport">
         <div className="m-wall">
-          {wall.map((tok, i) =>
-            tok.t === "cta" ? (
-              <a
-                key={i}
-                className={tok.primary ? "m-cta m-cta-primary" : "m-cta"}
-                href={tok.href}
-                {...(tok.external
-                  ? { target: "_blank", rel: "noreferrer" }
-                  : {})}
-              >
-                {tok.v}
-              </a>
-            ) : (
-              <span key={i} className={tok.hi ? "m-hi" : undefined}>
-                {tok.v}{" "}
-              </span>
-            ),
-          )}
+          {columns.map((col, ci) => (
+            <div key={ci} className={`m-col m-col-${ci % 6}`}>
+              {col.map((tok, i) =>
+                tok.t === "cta" ? (
+                  <a
+                    key={i}
+                    className={tok.primary ? "m-cta m-cta-primary" : "m-cta"}
+                    href={tok.href}
+                    {...(tok.external
+                      ? { target: "_blank", rel: "noreferrer" }
+                      : {})}
+                  >
+                    {tok.v}
+                  </a>
+                ) : tok.hi ? (
+                  <span key={i} className={`m-hi m-f${tok.phase}`}>
+                    {tok.v}{" "}
+                  </span>
+                ) : (
+                  <span key={i}>{tok.v} </span>
+                ),
+              )}
+            </div>
+          ))}
         </div>
+        <div className="m-wind m-wind-1" aria-hidden="true" />
+        <div className="m-wind m-wind-2" aria-hidden="true" />
       </main>
     </div>
   );

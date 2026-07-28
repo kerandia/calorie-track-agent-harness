@@ -280,35 +280,117 @@ a.cal-cell:hover {
 }
 
 .m-wall {
-  column-width: 300px;
-  column-gap: 28px;
-  padding: 16px 20px;
-  height: 116vh;
+  display: flex;
+  gap: 28px;
+  padding: 0 20px;
+  height: 100vh;
+  align-items: flex-start;
   font-size: 11.5px;
   line-height: 1.85;
   letter-spacing: 0.02em;
   text-transform: uppercase;
   color: var(--m-text);
   word-spacing: 0.14em;
-  animation: m-drift 70s ease-in-out infinite alternate;
 }
-@keyframes m-drift {
-  from {
-    transform: translateY(0);
+
+/* Each column sways on its own period + phase; neighbors move out of sync,
+   so a wave appears to travel across the field. */
+.m-col {
+  flex: 0 0 300px;
+  margin-top: -8vh;
+  animation: m-sway var(--sway-dur, 12s) ease-in-out infinite;
+}
+@keyframes m-sway {
+  0% {
+    transform: translateY(0) rotate(0deg);
   }
-  to {
-    transform: translateY(-14vh);
+  25% {
+    transform: translateY(-14px) rotate(-0.5deg);
+  }
+  50% {
+    transform: translateY(4px) rotate(0.2deg);
+  }
+  75% {
+    transform: translateY(14px) rotate(0.55deg);
+  }
+  100% {
+    transform: translateY(0) rotate(0deg);
   }
 }
-@media (prefers-reduced-motion: reduce) {
-  .m-wall {
-    animation: none;
-  }
-}
+.m-col-0 { --sway-dur: 11s;   animation-delay: -0s; }
+.m-col-1 { --sway-dur: 13.5s; animation-delay: -2.2s; }
+.m-col-2 { --sway-dur: 10s;   animation-delay: -4.6s; }
+.m-col-3 { --sway-dur: 14.5s; animation-delay: -6.4s; }
+.m-col-4 { --sway-dur: 12.5s; animation-delay: -8.9s; }
+.m-col-5 { --sway-dur: 15.5s; animation-delay: -11.3s; }
 
 .m-hi {
   color: var(--m-text-hi);
   font-weight: 700;
+  display: inline-block;
+  animation: m-float var(--float-dur, 6s) ease-in-out infinite;
+}
+@keyframes m-float {
+  0%, 100% {
+    transform: translate(0, 0);
+  }
+  30% {
+    transform: translate(1.5px, -3px);
+  }
+  65% {
+    transform: translate(-1.5px, 2.5px);
+  }
+}
+.m-f0 { --float-dur: 5.2s; animation-delay: -0.7s; }
+.m-f1 { --float-dur: 6.6s; animation-delay: -1.9s; }
+.m-f2 { --float-dur: 4.7s; animation-delay: -3.1s; }
+.m-f3 { --float-dur: 7.3s; animation-delay: -4.4s; }
+.m-f4 { --float-dur: 5.8s; animation-delay: -2.6s; }
+.m-f5 { --float-dur: 6.1s; animation-delay: -5.2s; }
+
+/* Gusts of light sweeping diagonally across the field. */
+.m-wind {
+  position: absolute;
+  inset: -20%;
+  pointer-events: none;
+  mix-blend-mode: screen;
+}
+.m-wind-1 {
+  background: linear-gradient(
+    105deg,
+    transparent 42%,
+    rgba(120, 220, 175, 0.07) 50%,
+    transparent 58%
+  );
+  background-size: 260% 100%;
+  animation: m-gust 13s ease-in-out infinite;
+}
+.m-wind-2 {
+  background: linear-gradient(
+    80deg,
+    transparent 44%,
+    rgba(217, 255, 236, 0.05) 50%,
+    transparent 56%
+  );
+  background-size: 320% 100%;
+  animation: m-gust 21s ease-in-out infinite reverse;
+  animation-delay: -7s;
+}
+@keyframes m-gust {
+  0% {
+    background-position: 130% 0;
+  }
+  100% {
+    background-position: -30% 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .m-col,
+  .m-hi,
+  .m-wind {
+    animation: none;
+  }
 }
 
 .m-cta {
