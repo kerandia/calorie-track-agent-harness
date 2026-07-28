@@ -259,6 +259,141 @@ a.cal-cell:hover {
   font-variant-numeric: tabular-nums;
 }
 
+/* ══ Manifesto landing (nell.ai-style text wall — scoped under .mani) ══ */
+.mani {
+  --m-bg: #06231a;
+  --m-text: #1f6a4d;
+  --m-text-hi: #4fae83;
+  --m-bright: #d9ffec;
+  position: fixed;
+  inset: 0;
+  background: var(--m-bg);
+  overflow: hidden;
+  font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas,
+    monospace;
+}
+
+.m-viewport {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+}
+
+.m-wall {
+  column-width: 300px;
+  column-gap: 28px;
+  padding: 16px 20px;
+  height: 116vh;
+  font-size: 11.5px;
+  line-height: 1.85;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--m-text);
+  word-spacing: 0.14em;
+  animation: m-drift 70s ease-in-out infinite alternate;
+}
+@keyframes m-drift {
+  from {
+    transform: translateY(0);
+  }
+  to {
+    transform: translateY(-14vh);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .m-wall {
+    animation: none;
+  }
+}
+
+.m-hi {
+  color: var(--m-text-hi);
+  font-weight: 700;
+}
+
+.m-cta {
+  display: inline;
+  color: #eafff4 !important;
+  background: rgba(79, 174, 131, 0.22);
+  outline: 1px solid rgba(79, 174, 131, 0.55);
+  padding: 2px 8px;
+  margin: 0 6px;
+  font-weight: 700;
+  font-size: 13px;
+  letter-spacing: 0.06em;
+  text-decoration: none;
+  white-space: nowrap;
+  transition: background 0.15s ease, outline-color 0.15s ease;
+}
+.m-cta:hover {
+  background: rgba(79, 174, 131, 0.45);
+  outline-color: #4fae83;
+}
+.m-cta-primary {
+  background: #d9ffec;
+  color: #06231a !important;
+  outline: none;
+  animation: m-pulse 2.6s ease-in-out infinite;
+}
+.m-cta-primary:hover {
+  background: #ffffff;
+}
+@keyframes m-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(217, 255, 236, 0.35);
+  }
+  50% {
+    box-shadow: 0 0 22px 2px rgba(217, 255, 236, 0.5);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .m-cta-primary {
+    animation: none;
+  }
+}
+
+.m-logo {
+  position: fixed;
+  top: 18px;
+  left: 22px;
+  z-index: 2;
+  color: #eafff4 !important;
+  text-decoration: none;
+  font-weight: 700;
+  font-size: 17px;
+  letter-spacing: 0.02em;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  text-transform: lowercase;
+}
+.m-logo-mark {
+  filter: saturate(0.8);
+}
+
+.m-top-btn {
+  position: fixed;
+  top: 14px;
+  right: 20px;
+  z-index: 2;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  background: #d9ffec;
+  color: #06231a !important;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 18px;
+  font-weight: 700;
+  text-decoration: none;
+  transition: transform 0.12s ease;
+}
+.m-top-btn:hover {
+  transform: scale(1.08);
+}
+
 /* ══ Landing page (light, warm health theme — scoped under .landing) ══ */
 .landing {
   --l-bg: #faf7f2;
