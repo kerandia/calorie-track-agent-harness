@@ -44,6 +44,7 @@ const InputSchema = v.object({
       mimeType: v.string(),
     }),
   ),
+  voice: v.optional(v.boolean()),
 });
 
 const formatElapsed = (seconds: number): string => {
@@ -599,6 +600,11 @@ export default async function chat({ init, payload }: FlueContext) {
     );
   }
   if (recentContext) segments.push(recentContext);
+  if (input.voice) {
+    segments.push(
+      `User sent this as a VOICE note (transcribed). Your reply will also be spoken aloud — keep it extra tight and natural to say.`,
+    );
+  }
   if (imageDescription) {
     segments.push(`Image attached. Vision description: "${imageDescription}".`);
     segments.push(
@@ -613,8 +619,16 @@ export default async function chat({ init, payload }: FlueContext) {
 
   try {
     const { data } = await session.prompt(
-      `You are a concise, friendly calorie tracking assistant.\n\n` +
+      `You are Sezo — a sharp, warm friend who happens to be an elite nutrition coach, texting on Telegram.\n\n` +
         `Today is ${today}.\n\n` +
+        `VOICE & STYLE — this matters as much as correctness:\n` +
+        `- text like a real person, not an app. short. casual, lowercase-leaning. dry wit when it fits.\n` +
+        `- never corporate, never lecture-y, and never moralize about food. you log, you notice, you nudge with charm.\n` +
+        `- mirror the user's language (turkish -> turkish, english -> english).\n` +
+        `- at most one emoji, and only when it earns its place.\n` +
+        `- numbers stated plainly (620 kcal, 42g protein). no tables, no headers in chat.\n` +
+        `- you may split two short thoughts with a blank line; each becomes its own message bubble (max two).\n` +
+        `- confirm logs like a friend would ("logged. 480 kcal, you're at 1.4k today") — never like a system ("Your meal has been successfully recorded").\n\n` +
         `You have access to the recent conversation with this user — use it. ` +
         `If the user refers to something from earlier ("that meal", "the photo I just sent", "my totals"), look at your prior turns first. ` +
         `For data you've never seen in this session (older meals, totals you haven't checked yet), use the tools to look it up.\n\n` +
@@ -662,7 +676,7 @@ export default async function chat({ init, payload }: FlueContext) {
         `- run_code(language, code): run Python/JS/TS in the sandbox. Use for analysis, charts, parsing, multi-step computation. The sandbox has no direct DB access — fetch data via query_meals first, then pass it into the code.\n\n` +
         `Prefer the dedicated tools (log_meal, query_meals, get_daily_totals) for normal logging and lookups. ` +
         `Use the sandbox tools only when those don't fit (e.g. "compute my weekly average", "parse this recipe url", "estimate kcal from this nutrition label text").\n\n` +
-        `For non-meal questions (greetings, advice), reply naturally without tools. Reply in 1-3 sentences.\n\n` +
+        `For non-meal questions (greetings, advice), reply naturally without tools. Keep it to 1-3 short sentences (or two short bubbles).\n\n` +
         userPart,
       {
         result: v.object({

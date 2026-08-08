@@ -32,10 +32,8 @@ export async function sendTyping(chatId: number): Promise<void> {
   }).catch(() => {});
 }
 
-/** Download the largest photo in a message as base64 jpeg. */
-export async function downloadPhotoBase64(
-  fileId: string,
-): Promise<{ base64: string; mimeType: string } | null> {
+/** Download any Telegram file by file_id. */
+export async function downloadFile(fileId: string): Promise<Uint8Array | null> {
   const token = process.env.TELEGRAM_BOT_TOKEN;
   const fileRes = await fetch(api("getFile"), {
     method: "POST",
@@ -51,8 +49,41 @@ export async function downloadPhotoBase64(
   if (!path) return null;
   const dl = await fetch(`https://api.telegram.org/file/bot${token}/${path}`);
   if (!dl.ok) return null;
-  const buf = Buffer.from(await dl.arrayBuffer());
-  return { base64: buf.toString("base64"), mimeType: "image/jpeg" };
+  return new Uint8Array(await dl.arrayBuffer());
+}
+
+/** Download the largest photo in a message as base64 jpeg. */
+export async function downloadPhotoBase64(
+  fileId: string,
+): Promise<{ base64: string; mimeType: string } | null> {
+  const bytes = await downloadFile(fileId);
+  if (!bytes) return null;
+  return {
+    base64: Buffer.from(bytes).toString("base64"),
+    mimeType: "image/jpeg",
+  };
+}
+
+/** Send a voice bubble (expects OGG/Opus bytes). Non-fatal on failure. */
+export async function sendVoice(
+  chatId: number,
+  audio: Uint8Array,
+): Promise<boolean> {
+  const form = new FormData();
+  form.append("chat_id", String(chatId));
+  form.append(
+    "voice",
+    new Blob([audio as BlobPart], { type: "audio/ogg" }),
+    "voice.ogg",
+  );
+  const res = await fetch(api("sendVoice"), { method: "POST", body: form });
+  if (!res.ok) {
+    console.warn(
+      `sendVoice failed ${res.status}: ${await res.text().catch(() => "")}`,
+    );
+    return false;
+  }
+  return true;
 }
 
 // ── Telegram update types (the subset we handle) ──────────────────────────
@@ -66,5 +97,6 @@ export type TgUpdate = {
     text?: string;
     caption?: string;
     photo?: { file_id: string }[];
+    voice?: { file_id: string; duration?: number; mime_type?: string };
   };
 };

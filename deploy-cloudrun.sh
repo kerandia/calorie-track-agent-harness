@@ -33,6 +33,7 @@ set -a; . ./.env; set +a
 : "${TELEGRAM_WEBHOOK_SECRET:?Set TELEGRAM_WEBHOOK_SECRET in .env (random string)}"
 : "${INTERNAL_API_SECRET:?Set INTERNAL_API_SECRET in .env (random string)}"
 : "${QSTASH_TOKEN:?Set QSTASH_TOKEN in .env (Upstash console -> QStash)}"
+: "${FISH_AUDIO_TOKEN:?Set FISH_AUDIO_TOKEN in .env (fish.audio -> API keys)}"
 
 if [ "$1" = "set-webhook" ]; then
   echo "Registering Telegram webhook -> ${SERVICE_URL}/tg/webhook"
@@ -60,6 +61,9 @@ SERVICE_URL: "${SERVICE_URL}"
 TELEGRAM_WEBHOOK_SECRET: "${TELEGRAM_WEBHOOK_SECRET}"
 INTERNAL_API_SECRET: "${INTERNAL_API_SECRET}"
 QSTASH_TOKEN: "${QSTASH_TOKEN}"
+FISH_AUDIO_TOKEN: "${FISH_AUDIO_TOKEN}"
+FISH_TTS_MODEL: "${FISH_TTS_MODEL:-s2.1-pro-free}"
+FISH_VOICE_ID: "${FISH_VOICE_ID:-}"
 EOF
 
 echo "Deploying '$SERVICE' to Cloud Run ($REGION, scale-to-zero)…"

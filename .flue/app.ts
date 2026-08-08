@@ -1,13 +1,35 @@
-import { flue, registerProvider } from "@flue/runtime/app";
+import { flue, observe, registerProvider } from "@flue/runtime/app";
 import { Hono } from "hono";
 import { Redis } from "@upstash/redis";
 import {
+  downloadFile,
   downloadPhotoBase64,
   sendMessage,
   sendTyping,
+  sendVoice,
   type TgUpdate,
 } from "./lib/telegramApi.js";
 import { createLoginToken } from "./lib/loginToken.js";
+import { cleanForSpeech, synthesize, transcribe } from "./lib/fishAudio.js";
+
+// Structured run telemetry → Cloud Run Logs Explorer (queryable JSON lines).
+// This is the observability layer; no external platform needed at this scale.
+observe((event) => {
+  if (event.type !== "run_end") return;
+  const e = event as unknown as {
+    runId?: string;
+    isError?: boolean;
+    durationMs?: number;
+  };
+  console.log(
+    JSON.stringify({
+      evt: "agent_run_end",
+      runId: e.runId,
+      isError: e.isError ?? false,
+      durationMs: e.durationMs,
+    }),
+  );
+});
 
 /**
  * Runtime provider/model config (build-time config lives in flue.config.ts).
@@ -119,8 +141,13 @@ app.post("/tg/webhook", async (c) => {
 
   const update = (await c.req.json().catch(() => null)) as TgUpdate | null;
   const msg = update?.message;
-  // Only handle plain user messages with text or a photo; ack everything else.
-  if (!update || !msg?.chat?.id || !msg.from?.id || (!msg.text && !msg.photo)) {
+  // Handle plain user messages with text, a photo, or a voice note.
+  if (
+    !update ||
+    !msg?.chat?.id ||
+    !msg.from?.id ||
+    (!msg.text && !msg.photo && !msg.voice)
+  ) {
     return c.json({ ok: true });
   }
 
@@ -165,7 +192,7 @@ app.post("/tg/process", async (c) => {
 
   const chatId = msg.chat.id;
   const tenantId = String(msg.from.id);
-  const text = msg.text ?? msg.caption ?? "";
+  let text = msg.text ?? msg.caption ?? "";
 
   // /login magic link — no agent turn needed.
   const cmd = text.trim().toLowerCase();
@@ -193,18 +220,40 @@ app.post("/tg/process", async (c) => {
   const typing = setInterval(() => void sendTyping(chatId), 4000);
   void sendTyping(chatId);
   try {
+    // Voice note → Fish Audio ASR → treat as a text turn.
+    let wasVoice = false;
+    if (msg.voice) {
+      const bytes = await downloadFile(msg.voice.file_id);
+      if (!bytes) {
+        await sendMessage(chatId, "couldn't grab that voice note — try again?");
+        return c.json({ ok: true });
+      }
+      try {
+        text = await transcribe(bytes, "voice.ogg");
+        wasVoice = true;
+      } catch (err) {
+        console.error("[tg] asr failed:", err);
+        await sendMessage(chatId, "couldn't make out that voice note — mind typing it?");
+        return c.json({ ok: true });
+      }
+      if (!text) {
+        await sendMessage(chatId, "heard mostly silence there — try again?");
+        return c.json({ ok: true });
+      }
+    }
+
     let image: { base64: string; mimeType: string } | undefined;
     const largest = msg.photo?.[msg.photo.length - 1];
     if (largest) {
       image = (await downloadPhotoBase64(largest.file_id)) ?? undefined;
       if (!image) {
-        await sendMessage(chatId, "Couldn't read that image. Try again?");
+        await sendMessage(chatId, "couldn't read that image — try again?");
         return c.json({ ok: true });
       }
     }
 
-    const imageNote = image ? " [+image]" : "";
-    console.log(`[${tenantId}]${imageNote} ${text || "(no caption)"}`);
+    const note = image ? " [+image]" : wasVoice ? " [voice]" : "";
+    console.log(`[${tenantId}]${note} ${text || "(no caption)"}`);
 
     const port = process.env.PORT ?? "8080";
     const res = await fetch(
@@ -215,14 +264,14 @@ app.post("/tg/process", async (c) => {
           "Content-Type": "application/json",
           "x-internal-secret": env("INTERNAL_API_SECRET"),
         },
-        body: JSON.stringify({ tenantId, text, image }),
+        body: JSON.stringify({ tenantId, text, image, voice: wasVoice }),
         signal: AbortSignal.timeout(540_000),
       },
     );
 
     if (!res.ok) {
       console.error(`[tg] agent ${res.status}: ${await res.text().catch(() => "")}`);
-      await sendMessage(chatId, "The model just hiccuped on me. Try again in a moment.");
+      await sendMessage(chatId, "the model just hiccuped on me — try again in a moment.");
       return c.json({ ok: true }); // don't retry LLM failures — user was told
     }
     const data = (await res.json()) as { result?: { reply?: string } };
@@ -234,7 +283,27 @@ app.post("/tg/process", async (c) => {
       return c.json({ ok: true });
     }
     console.log(`[${tenantId}] <- (run ${runId}) ${reply.slice(0, 200)}`);
-    await sendMessage(chatId, reply);
+
+    // Poke mechanic: blank-line-separated thoughts become separate bubbles.
+    const parts = reply
+      .split(/\n{2,}/)
+      .map((s) => s.trim())
+      .filter(Boolean)
+      .slice(0, 3);
+    for (let i = 0; i < Math.max(parts.length, 1); i++) {
+      await sendMessage(chatId, parts[i] ?? reply);
+      if (i < parts.length - 1) await new Promise((r) => setTimeout(r, 450));
+    }
+
+    // Spoken in, spoken out: voice notes get a voice reply on top of text.
+    if (wasVoice) {
+      try {
+        const speech = cleanForSpeech(reply).slice(0, 800);
+        if (speech) await sendVoice(chatId, await synthesize(speech));
+      } catch (err) {
+        console.warn("[tg] tts reply failed (text already sent):", err);
+      }
+    }
     return c.json({ ok: true });
   } catch (err) {
     console.error("[tg] process failed:", err);
