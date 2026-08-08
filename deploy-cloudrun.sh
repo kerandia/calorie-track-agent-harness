@@ -64,6 +64,7 @@ QSTASH_TOKEN: "${QSTASH_TOKEN}"
 FISH_AUDIO_TOKEN: "${FISH_AUDIO_TOKEN}"
 FISH_TTS_MODEL: "${FISH_TTS_MODEL:-s2.1-pro-free}"
 FISH_VOICE_ID: "${FISH_VOICE_ID:-}"
+STT_MODEL: "${STT_MODEL:-x-ai/grok-stt-1.0}"
 EOF
 
 echo "Deploying '$SERVICE' to Cloud Run ($REGION, scale-to-zero)…"

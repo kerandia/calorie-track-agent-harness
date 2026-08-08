@@ -10,7 +10,8 @@ import {
   type TgUpdate,
 } from "./lib/telegramApi.js";
 import { createLoginToken } from "./lib/loginToken.js";
-import { cleanForSpeech, synthesize, transcribe } from "./lib/fishAudio.js";
+import { cleanForSpeech, synthesize } from "./lib/fishAudio.js";
+import { transcribeVoice } from "./lib/stt.js";
 
 // Structured run telemetry → Cloud Run Logs Explorer (queryable JSON lines).
 // This is the observability layer; no external platform needed at this scale.
@@ -229,7 +230,7 @@ app.post("/tg/process", async (c) => {
         return c.json({ ok: true });
       }
       try {
-        text = await transcribe(bytes, "voice.ogg");
+        text = await transcribeVoice(bytes, "ogg");
         wasVoice = true;
       } catch (err) {
         console.error("[tg] asr failed:", err);
