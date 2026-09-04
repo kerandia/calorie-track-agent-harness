@@ -32,6 +32,10 @@ import {
 import { createSessionBox, type SessionBox } from "../lib/box.js";
 import { describeImage } from "../lib/vision.js";
 import { redisSessionStore } from "../lib/sessionStore.js";
+import {
+  DEFAULT_VISION_FALLBACK_MODEL,
+  MAIN_MODEL,
+} from "../lib/models.js";
 
 export const triggers = { webhook: true };
 
@@ -503,7 +507,7 @@ export default async function chat({ init, payload }: FlueContext) {
   };
 
   const harness = await init({
-    model: "nebius/MiniMaxAI/MiniMax-M2.5",
+    model: MAIN_MODEL,
     persist: redisSessionStore,
     tools: [
       logMealTool,
@@ -524,12 +528,13 @@ export default async function chat({ init, payload }: FlueContext) {
 
   let imageDescription: string | undefined;
   if (input.image) {
-    const visionModel =
-      process.env.VISION_MODEL ?? "google/gemma-4-26b-a4b-it:free";
+    const fallbackVisionModel =
+      process.env.VISION_MODEL ?? DEFAULT_VISION_FALLBACK_MODEL;
     try {
-      imageDescription = await describeImage(input.image, visionModel);
+      const vision = await describeImage(input.image, fallbackVisionModel);
+      imageDescription = vision.description;
       console.log(
-        `[chat] vision (${visionModel}): ${imageDescription.slice(0, 120)}`,
+        `[chat] vision (${vision.model}): ${imageDescription.slice(0, 120)}`,
       );
     } catch (err) {
       console.warn("[chat] vision call failed:", err);

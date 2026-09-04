@@ -27,8 +27,9 @@ graph LR
   F --> R[(Upstash Redis)]
   F --> V[(Upstash Vector)]
   F --> B[Upstash Box sandbox]
-  F -->|LLM| N[Nebius · MiniMax-M2.5]
-  P -->|photo| G[Gemma vision via OpenRouter]
+  F -->|text + tools| N[Nebius · GLM-5.3-Flash]
+  P -->|photo, primary| N
+  P -->|photo fallback| G[Gemma vision via OpenRouter]
   P -->|sendMessage| TG
   D[Next.js dashboard · Vercel] --> R
   U -->|/login magic link| D
@@ -48,8 +49,8 @@ The webhook → queue → processor split exists because Telegram requires a fas
 | Concern | Choice | Why |
 |---|---|---|
 | Agent harness | [Flue](https://flueframework.com) | Sessions with pluggable persistence, typed tool definitions, structured output enforcement, sandbox abstraction — without renting a hosted agent platform |
-| LLM | MiniMax-M2.5 via [Nebius Token Factory](https://tokenfactory.nebius.com) | Fast, strong tool-calling, OpenAI-compatible; swappable in one line via Flue's provider registry |
-| Vision | Gemma via OpenRouter (BYOK) | Photo → text description feeds the (text-only) main model; cheap and decoupled |
+| LLM | GLM-5.3-Flash via [Nebius Token Factory](https://tokenfactory.nebius.com) | Fast, multimodal, strong tool-calling, and OpenAI-compatible |
+| Vision | GLM-5.3-Flash via Nebius, with Gemma via OpenRouter as fallback | Photo → concise description feeds the tool-enabled agent turn; Gemma preserves image logging during Nebius vision failures |
 | State | Upstash Redis | Meal log, daily totals, profiles, assumptions, sessions, locks — all tenant-prefixed (`t:{telegramId}:*`) |
 | Semantic recall | Upstash Vector | "Have I logged eggs this week?" — embeddings per tenant namespace |
 | Agent compute | Upstash Box | Ephemeral per-turn Linux sandbox for `run_shell` / `run_code` tools |

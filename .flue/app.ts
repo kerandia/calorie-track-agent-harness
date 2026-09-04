@@ -12,6 +12,7 @@ import {
 import { createLoginToken } from "./lib/loginToken.js";
 import { cleanForSpeech, synthesize } from "./lib/fishAudio.js";
 import { transcribeVoice } from "./lib/stt.js";
+import { MAIN_MODEL_ID } from "./lib/models.js";
 
 // Structured run telemetry → Cloud Run Logs Explorer (queryable JSON lines).
 // This is the observability layer; no external platform needed at this scale.
@@ -81,8 +82,8 @@ registerProvider("nebius", {
   contextWindow: 262144,
   maxTokens: 8000,
   models: {
-    "MiniMaxAI/MiniMax-M2.5": {
-      contextWindow: 196608,
+    [MAIN_MODEL_ID]: {
+      contextWindow: 1048576,
       maxTokens: 8000,
     },
     "Qwen/Qwen3-30B-A3B-Instruct-2507": {
