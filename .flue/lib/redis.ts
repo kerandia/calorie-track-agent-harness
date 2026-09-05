@@ -1,4 +1,5 @@
 import { Redis } from "@upstash/redis";
+import type { PhotoKind } from "./vision.js";
 
 let _redis: Redis | null = null;
 const getRedis = (): Redis => {
@@ -634,6 +635,55 @@ export function summarizeProfile(profile: UserProfile): string {
     parts.push(`dislikes: ${profile.dislikes.join(", ")}`);
   if (profile.likes?.length) parts.push(`likes: ${profile.likes.join(", ")}`);
   return parts.join("; ");
+}
+
+// ── Photo memory ──────────────────────────────────────────────────────────
+//
+// Every photo the user sends is described once by the vision model and the
+// description is kept here for a week. The agent gets the recent ones in its
+// context each turn, so "what can I cook from the fridge pics I sent you?"
+// works even when the transcript is long or the photos arrived hours ago.
+
+export type PhotoMemory = {
+  /** ISO timestamp of when the photo was received. */
+  at: string;
+  kind: PhotoKind;
+  description: string;
+  caption?: string;
+};
+
+const PHOTO_MEMORY_MAX = 30;
+const PHOTO_MEMORY_TTL_S = 7 * 24 * 60 * 60;
+
+export async function rememberPhotos(
+  tenantId: string,
+  photos: PhotoMemory[],
+): Promise<void> {
+  if (photos.length === 0) return;
+  const key = k(tenantId, "photos");
+  const pipe = getRedis().pipeline();
+  // Newest first: push in chronological order so index 0 is the latest.
+  pipe.lpush(key, ...photos);
+  pipe.ltrim(key, 0, PHOTO_MEMORY_MAX - 1);
+  pipe.expire(key, PHOTO_MEMORY_TTL_S);
+  await pipe.exec();
+}
+
+export async function getRecentPhotos(
+  tenantId: string,
+  maxAgeMs: number,
+  limit: number,
+): Promise<PhotoMemory[]> {
+  const rows =
+    (await getRedis().lrange<PhotoMemory>(
+      k(tenantId, "photos"),
+      0,
+      PHOTO_MEMORY_MAX - 1,
+    )) ?? [];
+  const cutoff = Date.now() - maxAgeMs;
+  return rows
+    .filter((p) => p && typeof p.at === "string" && Date.parse(p.at) >= cutoff)
+    .slice(0, limit);
 }
 
 export { todayUTC };

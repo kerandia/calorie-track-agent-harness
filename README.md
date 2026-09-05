@@ -7,6 +7,8 @@ Calorie tracking is the first vertical; the architecture is built to extend into
 ## What it does
 
 - **Log meals by text or photo.** "I had two eggs" or a photo of the plate → kcal + macro estimate, persisted per user.
+- **Photos are classified, not just described.** A plate gets logged; a fridge / freezer / pantry shot is inventoried and remembered (not logged), so "what can I cook from what I sent you?" works hours later; a nutrition label gets its numbers quoted.
+- **One reply per burst.** An album of five photos, or "here you go" followed by four pictures, is one agent turn and one answer — not five isolated "that's a freezer, not a plate" replies.
 - **Natural corrections.** "That was yesterday, not today" moves the meal and fixes both days' totals. "It's a lentil waffle, not a rice cake" edits in place — no delete-and-relog.
 - **Conversational onboarding.** Age / height / weight / activity / allergies gathered chat-first; the daily kcal target is computed (Mifflin-St Jeor) or set explicitly.
 - **Proactive feedback.** The agent asks "how did that meal feel?" some time after a log, and records the sentiment on the meal.
@@ -21,8 +23,10 @@ Calorie tracking is the first vertical; the architecture is built to extend into
 graph LR
   U[User] -->|message / photo| TG[Telegram]
   TG -->|webhook push| W["/tg/webhook — fast ack"]
-  W --> Q[QStash queue]
-  Q -->|delivery + retries| P["/tg/process — full agent turn"]
+  W -->|RPUSH| I[(Redis inbox per user)]
+  W -->|ping| Q[QStash]
+  Q -->|delivery + retries| P["/tg/process — drain inbox in order,<br/>coalesce burst → one agent turn"]
+  I --> P
   P --> F[Flue agent]
   F --> R[(Upstash Redis)]
   F --> V[(Upstash Vector)]
@@ -42,7 +46,21 @@ Two deployables, one shared database:
 | **Agent** (`.flue/`, `src/`) | Google Cloud Run, scale-to-zero | Flue server exposing the chat agent + Telegram webhook pipeline |
 | **Dashboard** (`dashboard/`) | Vercel | Next.js app reading the same Upstash Redis directly |
 
-The webhook → queue → processor split exists because Telegram requires a fast webhook ack (slow responses cause duplicate redeliveries) while an agent turn takes 5–60s, and Cloud Run's request-based billing only grants CPU *inside* a request. QStash bridges the two: the webhook acks in ~200ms and enqueues; QStash calls `/tg/process` as a fresh request in which the whole turn runs. Per-user turns are serialized with a Redis lock (busy → 429 → QStash redelivers). Idle = zero instances = zero cost.
+The webhook → queue → processor split exists because Telegram requires a fast webhook ack (slow responses cause duplicate redeliveries) while an agent turn takes 5–60s, and Cloud Run's request-based billing only grants CPU *inside* a request. QStash bridges the two: the webhook acks in ~200ms; QStash calls `/tg/process` as a fresh request in which the whole turn runs. Idle = zero instances = zero cost.
+
+### Message ingestion: per-user inbox, one turn per burst
+
+The webhook doesn't hand QStash the update itself. It appends the update to an ordered **Redis inbox per user** (`t:{id}:inbox`) and pings QStash with just `{tenantId, chatId}`. `/tg/process` takes the user's turn lock, **drains the inbox in order**, and coalesces whatever has arrived — an album (Telegram delivers each photo as a separate update), "here all of them" plus four pictures, three rapid texts — into **one agent turn**. It waits ~1.2s after the newest item (2.5s for album photos) so a burst still trickling in lands in the same turn, loops until the inbox is empty, releases the lock, and re-checks the inbox once more so nothing appended during the hand-off is stranded. Items are peeked, processed, then trimmed, so a hard crash leaves them for QStash's retry instead of dropping them.
+
+Why not one QStash job per update with a 429 while busy (the first design): QStash's retry backoff is `e^(2.5·n)` seconds — 12s, 2.5 min, 30 min, 6 h — so a five-photo album came back minutes to hours late, out of order, and sometimes never (retries exhausted). Each photo was also an isolated turn, so the model answered five times and never saw the pictures together.
+
+### Photos: classify, remember, then act
+
+Each photo goes through a vision call that returns a **kind** (`plated_meal`, `packaged_food`, `ingredients_storage`, `menu_or_recipe`, `not_food`) plus a kind-appropriate description — an itemized inventory for a fridge or shelf, portions for a plate, the numbers for a label. Descriptions are stored in a per-user **photo memory** (`t:{id}:photos`, 7 days) and the last 48 hours are injected into every turn's context. That is what makes "what should I cook from what I sent you?" answerable without relying on the model to dig the right turn out of a long transcript.
+
+### Persona in the system prompt
+
+Sezo's voice and standing rules live in `.flue/roles/sezo.md`, a Flue *role* compiled into the build and applied as the system prompt (`init({ role: "sezo" })`). Each turn's user message carries only a small `[context]` block (date, profile, assumptions, most recent logged meal, photo memory) and what the user actually sent. Previously the whole persona was prepended to every user message, so the transcript was ~90% repeated instructions and the model lost track of what the user had sent a few turns back.
 
 ## Stack
 
@@ -50,12 +68,12 @@ The webhook → queue → processor split exists because Telegram requires a fas
 |---|---|---|
 | Agent harness | [Flue](https://flueframework.com) | Sessions with pluggable persistence, typed tool definitions, structured output enforcement, sandbox abstraction — without renting a hosted agent platform |
 | LLM | GLM-5.3-Flash via [Nebius Token Factory](https://tokenfactory.nebius.com) | Fast, multimodal, strong tool-calling, and OpenAI-compatible |
-| Vision | GLM-5.3-Flash via Nebius, with Gemma via OpenRouter as fallback | Photo → concise description feeds the tool-enabled agent turn; Gemma preserves image logging during Nebius vision failures |
-| State | Upstash Redis | Meal log, daily totals, profiles, assumptions, sessions, locks — all tenant-prefixed (`t:{telegramId}:*`) |
+| Vision | GLM-5.3-Flash via Nebius, with Gemma via OpenRouter as fallback | Photo → kind + structured description (inventory / portions / label numbers) feeds the tool-enabled agent turn and the photo memory; Gemma preserves image handling during Nebius vision failures |
+| State | Upstash Redis | Meal log, daily totals, profiles, assumptions, photo memory, per-user inbox, sessions, locks — all tenant-prefixed (`t:{telegramId}:*`) |
 | Semantic recall | Upstash Vector | "Have I logged eggs this week?" — embeddings per tenant namespace |
 | Agent compute | Upstash Box | Ephemeral per-turn Linux sandbox for `run_shell` / `run_code` tools |
 | Channel | Telegram (webhook; [grammY](https://grammy.dev) for local dev) | Free, has photos/voice, and the Telegram user id doubles as the tenant key and the dashboard identity |
-| Queue | Upstash QStash | Reliable delivery + retries between webhook ack and agent turn |
+| Queue | Upstash QStash | Reliable "go drain this user's inbox" delivery + retries between webhook ack and agent turn |
 | Dashboard | Next.js on Vercel | Server-rendered reads of the shared Redis; zero-config deploys |
 
 ## Why TypeScript
@@ -71,12 +89,14 @@ One hard-won caveat lives in `tsconfig.flue.json`: the agent code in `.flue/` is
 
 ```
 .flue/
-  agents/chat.ts      # the agent: system prompt + 12 tools (log/edit/query meals,
+  agents/chat.ts      # the agent: per-turn context + 12 tools (log/edit/query meals,
                       #   profile, feedback, assumptions, shell/code sandbox)
-  app.ts              # HTTP surface: Telegram webhook pipeline + provider registry,
-                      #   wraps Flue's app (Hono)
-  lib/                # redis (data layer), vector, box, vision, sessionStore,
-                      #   telegramApi, loginToken
+  roles/sezo.md       # Sezo's persona + rules → the system prompt (Flue role)
+  app.ts              # HTTP surface: Telegram webhook → Redis inbox → QStash →
+                      #   drain/coalesce → agent turn; provider registry; wraps Flue's app (Hono)
+  lib/                # redis (data layer + photo memory), inbox, vector, box,
+                      #   vision (classify + describe), sessionStore, telegramApi,
+                      #   stt, fishAudio, loginToken
 src/                  # local-dev long-polling bot (grammY) — prod uses webhooks
 dashboard/            # Next.js dashboard (Vercel) — own package.json
 Dockerfile            # single-process container: node dist/server.mjs

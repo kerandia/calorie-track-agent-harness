@@ -12,10 +12,12 @@ import {
   getMostRecentMeal,
   getProfile,
   getRecentMeals,
+  getRecentPhotos,
   isOnboarded,
   logMeal,
   noteAssumption,
   recordMealFeedback,
+  rememberPhotos,
   resolveMealId,
   summarizeProfile,
   todayUTC,
@@ -23,6 +25,7 @@ import {
   updateMealById,
   updateProfile,
   type MealRecord,
+  type PhotoMemory,
 } from "../lib/redis.js";
 import {
   deleteMealVector,
@@ -39,17 +42,40 @@ import {
 
 export const triggers = { webhook: true };
 
+const ImageSchema = v.object({
+  base64: v.string(),
+  mimeType: v.string(),
+});
+
+// One agent turn = one coalesced burst from the user: some text (possibly
+// several messages joined), zero or more photos, maybe a voice note.
 const InputSchema = v.object({
   tenantId: v.string(),
   text: v.string(),
-  image: v.optional(
-    v.object({
-      base64: v.string(),
-      mimeType: v.string(),
-    }),
-  ),
+  /** Legacy single-image shape (still sent by the local long-polling bot). */
+  image: v.optional(ImageSchema),
+  images: v.optional(v.array(ImageSchema)),
   voice: v.optional(v.boolean()),
+  /** Photos in the burst beyond the per-turn cap — not analyzed. */
+  photosDropped: v.optional(v.number()),
 });
+
+/** Local wall-clock for the user, if we know their timezone. */
+const formatLocalTime = (d: Date, tz?: string): string | undefined => {
+  if (!tz) return undefined;
+  try {
+    const s = new Intl.DateTimeFormat("en-GB", {
+      timeZone: tz,
+      weekday: "short",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    }).format(d);
+    return `${s} ${tz}`;
+  } catch {
+    return undefined;
+  }
+};
 
 const formatElapsed = (seconds: number): string => {
   if (seconds < 60) return `${seconds}s`;
@@ -360,6 +386,12 @@ export default async function chat({ init, payload }: FlueContext) {
       ),
       likes: Type.Optional(Type.Array(Type.String())),
       dislikes: Type.Optional(Type.Array(Type.String())),
+      timezone: Type.Optional(
+        Type.String({
+          description:
+            "IANA timezone like 'Europe/Berlin' or 'Europe/Istanbul'. Set when the user says where they live or what their local time is.",
+        }),
+      ),
     }),
     execute: async (args) => {
       const updated = await updateProfile(input.tenantId, args);
@@ -508,6 +540,11 @@ export default async function chat({ init, payload }: FlueContext) {
 
   const harness = await init({
     model: MAIN_MODEL,
+    // Sezo's persona and standing rules live in .flue/roles/sezo.md and ride
+    // in the SYSTEM prompt. They used to be prepended to every user message,
+    // so the transcript was ~90% repeated instructions and the model kept
+    // losing what the user had actually sent a few turns earlier.
+    role: "sezo",
     persist: redisSessionStore,
     tools: [
       logMealTool,
@@ -526,20 +563,30 @@ export default async function chat({ init, payload }: FlueContext) {
   });
   const session = await harness.session(input.tenantId);
 
-  let imageDescription: string | undefined;
-  if (input.image) {
-    const fallbackVisionModel =
-      process.env.VISION_MODEL ?? DEFAULT_VISION_FALLBACK_MODEL;
-    try {
-      const vision = await describeImage(input.image, fallbackVisionModel);
-      imageDescription = vision.description;
-      console.log(
-        `[chat] vision (${vision.model}): ${imageDescription.slice(0, 120)}`,
-      );
-    } catch (err) {
-      console.warn("[chat] vision call failed:", err);
-    }
-  }
+  // ── Photos in this burst: describe all of them in parallel ───────────────
+  const images = [
+    ...(input.images ?? []),
+    ...(input.image ? [input.image] : []),
+  ];
+  const fallbackVisionModel =
+    process.env.VISION_MODEL ?? DEFAULT_VISION_FALLBACK_MODEL;
+  const visions = await Promise.all(
+    images.map(async (img, i) => {
+      try {
+        const vision = await describeImage(img, {
+          caption: input.text,
+          fallbackModel: fallbackVisionModel,
+        });
+        console.log(
+          `[chat] vision ${i + 1}/${images.length} (${vision.model}) [${vision.kind}]: ${vision.description.slice(0, 120)}`,
+        );
+        return vision;
+      } catch (err) {
+        console.warn(`[chat] vision ${i + 1}/${images.length} failed:`, err);
+        return null;
+      }
+    }),
+  );
 
   const profile = await getProfile(input.tenantId);
   const profileSummary = summarizeProfile(profile);
@@ -547,6 +594,35 @@ export default async function chat({ init, payload }: FlueContext) {
   const missingFields = getMissingRequiredFields(profile);
 
   const now = new Date();
+
+  // Photo memory: read BEFORE storing this turn's photos, so the list is
+  // strictly "photos from earlier" and this turn's are presented separately.
+  let earlierPhotos: PhotoMemory[] = [];
+  try {
+    earlierPhotos = await getRecentPhotos(input.tenantId, 48 * 60 * 60 * 1000, 6);
+  } catch (err) {
+    console.warn("[chat] photo memory fetch failed:", err);
+  }
+  const newPhotoMemories: PhotoMemory[] = visions.flatMap((vis) =>
+    vis
+      ? [
+          {
+            at: now.toISOString(),
+            kind: vis.kind,
+            description: vis.description,
+            caption: input.text.trim() || undefined,
+          },
+        ]
+      : [],
+  );
+  if (newPhotoMemories.length > 0) {
+    try {
+      await rememberPhotos(input.tenantId, newPhotoMemories);
+    } catch (err) {
+      console.warn("[chat] photo memory store failed:", err);
+    }
+  }
+
   let recentContext = "";
   try {
     const recent = await getMostRecentMeal(input.tenantId);
@@ -554,10 +630,12 @@ export default async function chat({ init, payload }: FlueContext) {
       const elapsedMs = now.getTime() - Date.parse(recent.logged_at);
       if (elapsedMs >= 0 && elapsedMs < 24 * 60 * 60 * 1000) {
         const elapsed = formatElapsed(Math.floor(elapsedMs / 1000));
-        recentContext = `Last log: "${recent.text}" (${recent.kcal} kcal, id ${recent.id}), ${elapsed} ago.`;
+        recentContext =
+          `Database: the most recently LOGGED meal is "${recent.text}" (${recent.kcal} kcal, id ${recent.id}), logged ${elapsed} ago. ` +
+          `That is a DB record, not the last thing the user sent you — the conversation and the photo memory tell you that.`;
         if (elapsedMs < 180 * 1000) {
           recentContext +=
-            ` That was JUST NOW. If the user's current message restates, refines, or breaks down that same item (lists ingredients, gives a different name, adjusts portion), call update_meal with meal_id "recent" — do NOT log a new meal.`;
+            ` It was logged JUST NOW: if this message restates, refines, or breaks down that same item (ingredients, a different name, portion tweak), call update_meal with meal_id "recent" — do NOT log a new meal.`;
         }
       }
     }
@@ -581,10 +659,14 @@ export default async function chat({ init, payload }: FlueContext) {
     console.warn("[chat] context fetch failed:", err);
   }
 
-  const segments: string[] = [`Now: ${now.toISOString()}.`];
-  if (profileSummary) segments.push(`Profile: ${profileSummary}.`);
+  // ── Per-turn context block (the persona itself is in the system prompt) ──
+  const localTime = formatLocalTime(now, profile.timezone);
+  const ctx: string[] = [
+    `Today (UTC date — the meal database keys days by UTC date): ${today}. Now: ${now.toISOString()}${localTime ? ` = ${localTime}` : ""}.`,
+  ];
+  if (profileSummary) ctx.push(`Profile: ${profileSummary}.`);
   if (activeAssumptions.length > 0) {
-    segments.push(
+    ctx.push(
       `Active assumptions about user: ` +
         activeAssumptions
           .map((a) => `[${a.id}] ${a.text} (${a.confidence})`)
@@ -593,102 +675,69 @@ export default async function chat({ init, payload }: FlueContext) {
     );
   }
   if (!onboarded) {
-    segments.push(
+    ctx.push(
       `[ONBOARDING NEEDED] User is not fully onboarded. Still missing: ${missingFields.join(", ")}. Ask 1-2 short, friendly questions per turn to gather these. Save answers via update_profile immediately.`,
     );
   }
   if (pendingFeedback.length > 0) {
     const m = pendingFeedback[0]!;
     const ageMin = Math.floor((now.getTime() - Date.parse(m.logged_at)) / 60000);
-    segments.push(
-      `[PENDING FEEDBACK] Meal "${m.text}" (id ${m.id}) was logged ${ageMin}m ago and you haven't asked how it felt. If this turn has a natural opening (user isn't actively logging new food or asking something else), ask casually — only ONCE. When they answer, call record_feedback with meal_id "${m.id}". Skip if the moment doesn't fit.`,
+    ctx.push(
+      `[PENDING FEEDBACK] Meal "${m.text}" (id ${m.id}) was logged ${ageMin}m ago and you haven't asked how it felt. If this turn has a natural opening, ask casually — only ONCE. When they answer, call record_feedback with meal_id "${m.id}". Skip if the moment doesn't fit.`,
     );
   }
-  if (recentContext) segments.push(recentContext);
+  if (recentContext) ctx.push(recentContext);
+  if (earlierPhotos.length > 0) {
+    ctx.push(
+      `Photos the user sent EARLIER (your photo memory, newest first — when they say "the pics I sent", this is what they mean):\n` +
+        earlierPhotos
+          .map((p) => {
+            const ago = formatElapsed(
+              Math.max(0, Math.floor((now.getTime() - Date.parse(p.at)) / 1000)),
+            );
+            const cap = p.caption ? ` (their caption: "${p.caption}")` : "";
+            return `- ${ago} ago [${p.kind}]${cap}: ${p.description}`;
+          })
+          .join("\n"),
+    );
+  }
   if (input.voice) {
-    segments.push(
+    ctx.push(
       `User sent this as a VOICE note (transcribed). Your reply will also be spoken aloud — keep it extra tight and natural to say.`,
     );
   }
-  if (imageDescription) {
-    segments.push(`Image attached. Vision description: "${imageDescription}".`);
-    segments.push(
-      input.text.trim()
-        ? `User caption: "${input.text}"`
-        : `No caption — identify the food and call log_meal (unless this is a correction per the rule above).`,
+
+  // ── What the user just sent ──────────────────────────────────────────────
+  const text = input.text.trim();
+  const msg: string[] = [];
+  if (images.length > 0) {
+    const dropped = input.photosDropped ?? 0;
+    msg.push(
+      `The user just sent ${images.length} photo${images.length === 1 ? "" : "s"}` +
+        (dropped > 0
+          ? ` (+${dropped} more that weren't analyzed — mention that briefly)`
+          : "") +
+        (text ? " together with a message:" : ", no caption:"),
     );
-  } else {
-    segments.push(`User says: "${input.text}"`);
+    visions.forEach((vis, i) => {
+      msg.push(
+        vis
+          ? `Photo ${i + 1} [${vis.kind}]: ${vis.description}`
+          : `Photo ${i + 1}: (couldn't analyze this one — say so briefly)`,
+      );
+    });
   }
-  const userPart = segments.join("\n");
+  if (text) msg.push(`User says: "${text}"`);
+  else if (images.length === 0) msg.push(`User says: ""`);
+
+  const promptText = `[context]\n${ctx.join("\n")}\n[/context]\n\n${msg.join("\n")}`;
 
   try {
-    const { data } = await session.prompt(
-      `You are Sezo — a sharp, warm friend who happens to be an elite nutrition coach, texting on Telegram.\n\n` +
-        `Today is ${today}.\n\n` +
-        `VOICE & STYLE — this matters as much as correctness:\n` +
-        `- text like a real person, not an app. short. casual, lowercase-leaning. dry wit when it fits.\n` +
-        `- never corporate, never lecture-y, and never moralize about food. you log, you notice, you nudge with charm.\n` +
-        `- mirror the user's language (turkish -> turkish, english -> english).\n` +
-        `- at most one emoji, and only when it earns its place.\n` +
-        `- numbers stated plainly (620 kcal, 42g protein). no tables, no headers in chat.\n` +
-        `- you may split two short thoughts with a blank line; each becomes its own message bubble (max two).\n` +
-        `- confirm logs like a friend would ("logged. 480 kcal, you're at 1.4k today") — never like a system ("Your meal has been successfully recorded").\n\n` +
-        `You have access to the recent conversation with this user — use it. ` +
-        `If the user refers to something from earlier ("that meal", "the photo I just sent", "my totals"), look at your prior turns first. ` +
-        `For data you've never seen in this session (older meals, totals you haven't checked yet), use the tools to look it up.\n\n` +
-        `If an image is attached, identify the food and call log_meal with your best kcal/macro estimate. ` +
-        `If the image is not food, describe what you see briefly and skip logging.\n\n` +
-        `DATES: meals default to TODAY. If the user says a meal was on another day ("yesterday", "on Monday", a date), ` +
-        `pass the concrete YYYY-MM-DD as log_meal's \`date\` (compute it from today's date in context). Do NOT log it to today and then fix it.\n\n` +
-        `CORRECTIONS — important: If the user pushes back on something you logged ` +
-        `("no, it's actually X", "that's not Y, it's Z", "you missed the rice", "it was a smaller portion", "that was yesterday not today"), ` +
-        `EDIT the existing meal — do NOT delete and re-log (that loses the meal). Use update_meal:\n` +
-        `- Wrong food/calories → update_meal with the corrected fields, keeping the SAME meal (don't swap it for a different food).\n` +
-        `- Wrong day → update_meal with \`date\` set to move it (totals on both days are fixed automatically).\n` +
-        `- "wasn't food" / "didn't eat that" / "undo" → delete_meal.\n` +
-        `Use meal_id "recent" for the meal you just logged; for an older meal, query_meals first to get its id, then act on that id.\n` +
-        `\n` +
-        `TIME SIGNAL: each turn includes a "Last log: ... N ago" line with its id. If that elapsed time is short (under a couple minutes) ` +
-        `and the user's new message looks like a restatement, ingredient breakdown, or different name for what you just logged, ` +
-        `that is almost certainly a correction — call update_meal with meal_id "recent", do NOT create a new meal entry. ` +
-        `An ingredient list sent right after a vague vision identification is the canonical example.\n` +
-        `\n` +
-        `Do all of this without asking for permission; just fix and confirm what changed.\n\n` +
-        `ONBOARDING: When the user message context contains "[ONBOARDING NEEDED]", the user is new. ` +
-        `Walk them through a friendly, conversational questionnaire — 1-2 short questions per turn, not a survey dump. ` +
-        `Required to complete onboarding: name, age, sex, height_cm, weight_kg. ` +
-        `Nice-to-haves to gather over multiple turns: activity_level, dietary_preferences, allergies, likes, dislikes. ` +
-        `If they want to skip, respect it and gather missing info naturally over time. ` +
-        `Always save answers via update_profile as you get them.\n\n` +
-        `PERSONALIZATION: Once you have profile info (allergies, preferences, kcal target), USE it. ` +
-        `Don't suggest gluten-containing foods to a gluten-free user. Compare meals against their daily kcal target. ` +
-        `If during a normal conversation the user reveals something new about themselves ("I'm vegan now", "I dropped 3kg"), call update_profile.\n\n` +
-        `PROACTIVE FEEDBACK: If the context shows a [PENDING FEEDBACK] marker, you logged a meal a while ago without asking how the user felt. Ask once, casually, only on a turn with a natural opening — don't interrupt new logging or unrelated questions. When the user answers, call record_feedback with the meal id from the marker.\n\n` +
-        `ASSUMPTIONS: When you infer something about the user that goes beyond their profile (e.g. "feels better on high-protein meals", "tends to under-eat on weekdays"), call note_assumption with a confidence level. The active assumptions are listed in the context block — refer to them when relevant. When the user reacts to an assumption ("yeah that's right" / "no I don't"), call update_assumption_status with the assumption's id to confirm or reject. Don't double-record profile facts (allergies, explicit preferences, goals) as assumptions — those go in update_profile.\n\n` +
-        `Tools:\n` +
-        `- log_meal: when the user describes food they ate (or sends a food image). Estimate kcal/macros if not provided. Set \`date\` only for meals from another day.\n` +
-        `- update_meal: edit or move a logged meal (meal_id "recent" or an id from query_meals). Use for corrections and "that was yesterday".\n` +
-        `- delete_meal: remove a logged meal (meal_id "recent" or an id) when it wasn't food / didn't happen / undo.\n` +
-        `- query_meals: when the user asks about ANY past meals. Returns each meal's id — use those ids with update_meal/delete_meal.\n` +
-        `- get_daily_totals: when the user asks about totals.\n` +
-        `- update_profile: capture onboarding answers or any personal info revealed in conversation.\n` +
-        `- get_profile: read the current profile (use when the user asks what you know about them).\n` +
-        `- record_feedback: attach a good/neutral/bad sentiment + optional note to a logged meal after the user tells you how they felt.\n` +
-        `- note_assumption: record an inference about the user that's beyond explicit profile facts.\n` +
-        `- update_assumption_status: confirm or reject an active assumption when the user reacts.\n` +
-        `- run_shell(cmd): one-shot shell command in a Linux sandbox. Use for installs (pip/apk), curl, etc.\n` +
-        `- run_code(language, code): run Python/JS/TS in the sandbox. Use for analysis, charts, parsing, multi-step computation. The sandbox has no direct DB access — fetch data via query_meals first, then pass it into the code.\n\n` +
-        `Prefer the dedicated tools (log_meal, query_meals, get_daily_totals) for normal logging and lookups. ` +
-        `Use the sandbox tools only when those don't fit (e.g. "compute my weekly average", "parse this recipe url", "estimate kcal from this nutrition label text").\n\n` +
-        `For non-meal questions (greetings, advice), reply naturally without tools. Keep it to 1-3 short sentences (or two short bubbles).\n\n` +
-        userPart,
-      {
-        result: v.object({
-          reply: v.string(),
-        }),
-      },
-    );
+    const { data } = await session.prompt(promptText, {
+      result: v.object({
+        reply: v.string(),
+      }),
+    });
     return data;
   } finally {
     if (boxRef.current) {

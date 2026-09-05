@@ -42,7 +42,7 @@ async function handleAgentTurn(
       body: JSON.stringify({
         tenantId: msg.tenantId,
         text: msg.text,
-        image: msg.image,
+        images: msg.image ? [msg.image] : undefined,
       }),
       signal: AbortSignal.timeout(FLUE_TIMEOUT_MS),
     });

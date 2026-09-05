@@ -94,6 +94,10 @@ export type TgUpdate = {
     message_id: number;
     from?: { id: number };
     chat?: { id: number };
+    /** Unix seconds, set by Telegram. */
+    date?: number;
+    /** Set on every photo of an album; same value across the album. */
+    media_group_id?: string;
     text?: string;
     caption?: string;
     photo?: { file_id: string }[];
