@@ -68,16 +68,14 @@ const K_REP = 260; // Hertzian contact stiffness
 const REP_CAP = 1200; // max contact acceleration (px/s^2)
 const MOUSE_A = 1600; // pointer repulsor peak accel
 const MOUSE_SIG = 85; // pointer repulsor falloff (px)
-const CTA_A = 700; // CTA repulsor peak accel
-const CTA_SIG = 44;
 const MAX_V = 180;
 const MAX_DISP = 120; // hard clamp on wander from home
 const MAX_WORDS = 5200;
 const CELL = 96; // spatial hash cell (≥ widest pair reach)
 
-const BASE_COLOR = "#1f6a4d";
+const BASE_COLOR = "#184f3d";
 const HI_COLOR = "#4fae83";
-const BG = "#06231a";
+const BG = "#03130e";
 
 type Body = {
   word: string;
@@ -90,8 +88,6 @@ type Body = {
   vx: number;
   vy: number;
 };
-
-type Rect = { cx: number; cy: number; hw: number; hh: number };
 
 // wind: superposed transverse waves, three octaves (px/s)
 function windX(x: number, y: number, t: number): number {
@@ -109,10 +105,8 @@ function windY(x: number, y: number, t: number): number {
   );
 }
 
-export default function ManifestoField({ tgUrl }: { tgUrl: string }) {
+export default function ManifestoField() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const ctaARef = useRef<HTMLAnchorElement>(null);
-  const ctaBRef = useRef<HTMLAnchorElement>(null);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -129,7 +123,6 @@ export default function ManifestoField({ tgUrl }: { tgUrl: string }) {
     let hiIdx: number[] = [];
     let W = 0;
     let H = 0;
-    let repulsors: Rect[] = [];
     const pointer = { x: -1e9, y: -1e9 };
 
     function layout() {
@@ -191,20 +184,6 @@ export default function ManifestoField({ tgUrl }: { tgUrl: string }) {
       }
     }
 
-    function measureRepulsors() {
-      repulsors = [];
-      for (const el of [ctaARef.current, ctaBRef.current]) {
-        if (!el) continue;
-        const r = el.getBoundingClientRect();
-        repulsors.push({
-          cx: r.left + r.width / 2,
-          cy: r.top + r.height / 2,
-          hw: r.width / 2 + 8,
-          hh: r.height / 2 + 8,
-        });
-      }
-    }
-
     // spatial hash rebuilt per step
     const grid = new Map<number, number[]>();
     const cellKey = (cx: number, cy: number) => cx * 8192 + cy;
@@ -233,21 +212,6 @@ export default function ManifestoField({ tgUrl }: { tgUrl: string }) {
           if (d2 < MOUSE_SIG * MOUSE_SIG * 16) {
             const d = Math.sqrt(d2) || 1;
             const a = MOUSE_A * Math.exp(-d2 / (2 * MOUSE_SIG * MOUSE_SIG));
-            ax += (dx / d) * a;
-            ay += (dy / d) * a;
-          }
-        }
-
-        // CTA repulsors (distance to expanded rect)
-        for (const r of repulsors) {
-          const qx = Math.max(Math.abs(b.x - r.cx) - r.hw, 0);
-          const qy = Math.max(Math.abs(b.y - r.cy) - r.hh, 0);
-          const d2 = qx * qx + qy * qy;
-          if (d2 < CTA_SIG * CTA_SIG * 12) {
-            const a = CTA_A * Math.exp(-d2 / (2 * CTA_SIG * CTA_SIG));
-            const dx = b.x - r.cx;
-            const dy = b.y - r.cy;
-            const d = Math.sqrt(dx * dx + dy * dy) || 1;
             ax += (dx / d) * a;
             ay += (dy / d) * a;
           }
@@ -322,7 +286,6 @@ export default function ManifestoField({ tgUrl }: { tgUrl: string }) {
     }
 
     layout();
-    measureRepulsors();
     draw();
 
     let raf = 0;
@@ -353,7 +316,6 @@ export default function ManifestoField({ tgUrl }: { tgUrl: string }) {
       clearTimeout(resizeTimer);
       resizeTimer = setTimeout(() => {
         layout();
-        measureRepulsors();
         if (reduced) draw();
       }, 150);
     };
@@ -372,29 +334,5 @@ export default function ManifestoField({ tgUrl }: { tgUrl: string }) {
     };
   }, []);
 
-  return (
-    <>
-      <canvas ref={canvasRef} className="m-canvas" aria-hidden="true" />
-      <a
-        ref={ctaARef}
-        className="m-cta m-cta-primary m-cta-anchor m-cta-a1"
-        href={tgUrl}
-        target="_blank"
-        rel="noreferrer"
-      >
-        START ON TELEGRAM →
-      </a>
-      <a ref={ctaBRef} className="m-cta m-cta-anchor m-cta-a2" href="/login">
-        LOGIN TO DASHBOARD →
-      </a>
-      {/* Real copy for crawlers and screen readers */}
-      <p className="m-sr">
-        Sezo is a health agent on Telegram. Text or photograph your meals and
-        it logs calories and macros, remembers your goals and allergies, fixes
-        its own mistakes when you correct it, and turns your month into a
-        calorie calendar. Start on Telegram: {tgUrl} — or log in to your
-        dashboard at /login.
-      </p>
-    </>
-  );
+  return <canvas ref={canvasRef} className="m-canvas" aria-hidden="true" />;
 }
