@@ -13,8 +13,10 @@ Calorie tracking is the first vertical; the architecture is built to extend into
 - **Conversational onboarding.** Age / height / weight / activity / allergies gathered chat-first; the daily kcal target is computed (Mifflin-St Jeor) or set explicitly.
 - **Proactive feedback.** The agent asks "how did that meal feel?" some time after a log, and records the sentiment on the meal.
 - **Assumption ledger.** Inferences the agent makes about you ("tends to skip breakfast") are stored with confidence levels, shown on the dashboard, and confirmable/rejectable.
-- **Persistent memory.** Conversation history is stored in Redis, so it survives deploys and instance restarts.
-- **A computer of its own.** For tasks no tool covers (compute a weekly average, parse a recipe URL), the agent spins up an ephemeral Linux sandbox (Upstash Box) and runs code.
+- **Persistent memory.** One continuous conversation per user, stored in Redis, so it survives deploys and instance restarts; older turns are compacted into a summary once the transcript passes ~60k tokens.
+- **A computer of its own.** For tasks no tool covers (compute a weekly average, parse a recipe URL), the agent spins up an ephemeral Linux sandbox (Upstash Box) and runs code. This is the first step toward a general personal agent; persistent browser sessions, credential vaulting, and long-lived workspaces are intentionally separate future capabilities.
+- **Pages it publishes for you.** Ask for a trip plan, a weekly meal plan or a shopping list and the agent writes a self-contained HTML page, hosts it on Upstash Blob under your tenant prefix, and sends you the link. "Add day 3" updates the same URL.
+- **Maps it publishes for you.** Places (an itinerary, restaurants near the hotel, "what's within 10 min walk of X") become a live interactive map via [MapToAgent](https://maptoagent.xyz): grouped pins, routes per day, walk/bike/drive reach areas. Same link on update.
 - **Web dashboard.** Calorie calendar heatmap (deficit/surplus per day), daily progress ring, macro bars, meal log by day, profile + assumptions. Login via a one-time magic link the bot DMs you.
 
 ## Architecture
@@ -31,6 +33,8 @@ graph LR
   F --> R[(Upstash Redis)]
   F --> V[(Upstash Vector)]
   F --> B[Upstash Box sandbox]
+  F -->|publish_page| BL[(Upstash Blob · public bucket)]
+  F -->|publish_map| MR[MapToAgent · maptoagent.xyz]
   F -->|text + tools| N[Nebius · GLM-5.3-Flash]
   P -->|photo, primary| N
   P -->|photo fallback| G[Gemma vision via OpenRouter]
@@ -58,9 +62,27 @@ Why not one QStash job per update with a 429 while busy (the first design): QSta
 
 Each photo goes through a vision call that returns a **kind** (`plated_meal`, `packaged_food`, `ingredients_storage`, `menu_or_recipe`, `not_food`) plus a kind-appropriate description — an itemized inventory for a fridge or shelf, portions for a plate, the numbers for a label. Descriptions are stored in a per-user **photo memory** (`t:{id}:photos`, 7 days) and the last 48 hours are injected into every turn's context. That is what makes "what should I cook from what I sent you?" answerable without relying on the model to dig the right turn out of a long transcript.
 
+### Artifacts: pages and maps the agent publishes
+
+Beyond chat replies the agent can hand the user a link — a page it wrote, or a map of places.
+
+**The model writes content, not chrome.** `publish_page` takes a *body fragment*; `lib/pageTemplate.ts` sanitizes it and renders it into the Sezar page shell — wordmark, typography scale, light/dark via `prefers-color-scheme`, print rules, and a house class vocabulary (`.day`, `.stop`, `.stats`, `.kv`, `.note`, `ul.check`, `.cta`) the model composes with. Letting the model invent inline CSS per page produced a different-looking document every time; now the shell owns the design and a page costs ~9 KB with the whole system inlined. Nothing external is fetched, so a page renders the same offline, in an email preview, and saved to PDF. The sanitizer is an allowlist — structural tags, our classes, `http(s)`/`mailto`/`tel` links that get `rel="noopener noreferrer nofollow"` — so scripts, inline styles, iframes, forms and remote images can't reach a published page. Full documents are no longer accepted at all: the shell owns `<head>`, so nothing legitimate needs to live outside the allowlist.
+
+**Storage and tenancy.** Pages land in a **public** Upstash Blob bucket at `p/{sha256(tenant)[:16]}/{slug}-{random}.html`; the hashed prefix keeps the Telegram id out of shared links and the random suffix makes URLs unlisted. A *private* bucket cannot work here: it exposes no public URL, and its signed URLs are capped by the signing credential (measured at ~437s no matter what `expiresIn` asks for), so a link would die minutes after you sent it. On a private bucket `putPage` throws `PrivateBucketError` and the agent falls back to sending the content as a message. `publish_map` posts typed places to [MapToAgent](https://maptoagent.xyz) and returns a hosted map URL. Both hosts are storage only: which user owns what lives in a per-tenant **artifact registry** in Redis (`t:{id}:artifact:*`), the last five ride in each turn's context so "add day 3" becomes an update instead of a duplicate, and the model only ever sees ids from that registry — which is what enforces tenancy.
+
+**Writes are gated and concurrency-safe.** `publish_*`, `update_*` and `delete_artifact` do not act: they stage the rendered draft in Redis and return a one-time token, and only a standalone `/approve <token>` message from the authenticated user within 10 minutes executes it. Model output can therefore never publish by itself. Updates are optimistic-concurrency: `read_artifact` returns the stored page with its etag (or the map with its version) and the update must pass it back, so a revision can't silently clobber a newer one.
+
+### One session per tenant (and the bug that hid it)
+
+Flue keys a session's storage by `[instanceId, harness, sessionName]`, where `instanceId` is the `<id>` segment of the agent URL. The processor used to call `/agents/chat/<telegram update_id>`, so every message opened a brand-new session: the bot had no conversation memory at all (one user had 45 one-turn sessions in Redis), and everything that looked like memory came from the Redis-side context block. The URL now carries the tenant id, so a user has exactly one conversation. Compaction is tuned for chat (`WORKING_CONTEXT_TOKENS` in `lib/models.ts`): the model has a 1M window, but re-sending a huge transcript every Telegram turn is slow and pricey, so older turns are summarised past ~60k tokens with the last 10k kept verbatim.
+
+### Latency: reasoning budget, timeouts, telemetry
+
+GLM-5.3-Flash thinks before it answers; on a map-building turn that was ~3k hidden tokens per model call and the single biggest latency cost (a first trip plan took 321s, past the processor's timeout). Flue registers custom models with `reasoning: false` and never sends an effort level, so `app.ts` adds `reasoning_effort` (env `NEBIUS_REASONING_EFFORT`, default `low`) at the HTTP layer for Nebius chat completions that carry tools; vision calls are exempt because they describe better with thinking on. Timeouts are sized for real turns (agent 480s, drain deadline 60s, lock 600s, all inside Cloud Run's 600s request), and a turn longer than 40s sends a one-line "still working" bubble. Every model call and tool call emits a JSON log line (`llm_turn`, `tool_call`) with duration and token counts, queryable in Cloud Run Logs Explorer.
+
 ### Persona in the system prompt
 
-Sezo's voice and standing rules live in `.flue/roles/sezo.md`, a Flue *role* compiled into the build and applied as the system prompt (`init({ role: "sezo" })`). Each turn's user message carries only a small `[context]` block (date, profile, assumptions, most recent logged meal, photo memory) and what the user actually sent. Previously the whole persona was prepended to every user message, so the transcript was ~90% repeated instructions and the model lost track of what the user had sent a few turns back.
+Sezar's voice and standing rules live in `.flue/roles/sezar.md`, a Flue *role* compiled into the build and applied as the system prompt (`init({ role: "sezar" })`). Each turn's user message carries only a small `[context]` block (date, profile, assumptions, most recent logged meal, photo memory) and what the user actually sent. Previously the whole persona was prepended to every user message, so the transcript was ~90% repeated instructions and the model lost track of what the user had sent a few turns back.
 
 ## Stack
 
@@ -72,7 +94,9 @@ Sezo's voice and standing rules live in `.flue/roles/sezo.md`, a Flue *role* com
 | State | Upstash Redis | Meal log, daily totals, profiles, assumptions, photo memory, per-user inbox, sessions, locks — all tenant-prefixed (`t:{telegramId}:*`) |
 | Semantic recall | Upstash Vector | "Have I logged eggs this week?" — embeddings per tenant namespace |
 | Agent compute | Upstash Box | Ephemeral per-turn Linux sandbox for `run_shell` / `run_code` tools |
-| Channel | Telegram (webhook; [grammY](https://grammy.dev) for local dev) | Free, has photos/voice, and the Telegram user id doubles as the tenant key and the dashboard identity |
+| Page hosting | Upstash Blob (**public** bucket) | Pages the agent writes (plans, lists) rendered into the Sezar shell, tenant-prefixed paths, unlisted URLs, updated in place under an etag |
+| Maps | [MapToAgent](https://maptoagent.xyz) | Typed places in, hosted interactive map URL out; groups, routes, isochrone reach areas; stable URL across updates |
+| Channel | Telegram (webhook; [grammY](https://grammy.dev) for local dev) | Free, has photos/voice, and the verified Telegram sender id doubles as the tenant key and dashboard identity; future channels need provider-specific sender verification |
 | Queue | Upstash QStash | Reliable "go drain this user's inbox" delivery + retries between webhook ack and agent turn |
 | Dashboard | Next.js on Vercel | Server-rendered reads of the shared Redis; zero-config deploys |
 
@@ -91,12 +115,15 @@ One hard-won caveat lives in `tsconfig.flue.json`: the agent code in `.flue/` is
 .flue/
   agents/chat.ts      # the agent: per-turn context + 12 tools (log/edit/query meals,
                       #   profile, feedback, assumptions, shell/code sandbox)
-  roles/sezo.md       # Sezo's persona + rules → the system prompt (Flue role)
+  roles/sezar.md      # Sezar's persona + rules → the system prompt (Flue role)
   app.ts              # HTTP surface: Telegram webhook → Redis inbox → QStash →
                       #   drain/coalesce → agent turn; provider registry; wraps Flue's app (Hono)
-  lib/                # redis (data layer + photo memory), inbox, vector, box,
-                      #   vision (classify + describe), sessionStore, telegramApi,
-                      #   stt, fishAudio, loginToken
+  capabilities/       # artifacts.ts — page/map tools + the /approve gate
+  lib/                # redis (data layer + photo memory + artifact registry), inbox,
+                      #   vector, box, vision (classify + describe), pages (Upstash Blob),
+                      #   pageTemplate (the Sezar page shell + sanitizer),
+                      #   maproom (MapToAgent client), artifactApproval, sessionStore,
+                      #   telegramApi, stt, fishAudio, loginToken, message (envelope)
 src/                  # local-dev long-polling bot (grammY) — prod uses webhooks
 dashboard/            # Next.js dashboard (Vercel) — own package.json
 Dockerfile            # single-process container: node dist/server.mjs
@@ -111,7 +138,7 @@ cp .env.example .env   # fill in tokens (see below)
 npm run dev            # flue dev server + long-polling bot
 ```
 
-Requires: a Telegram bot token (@BotFather), Upstash Redis + Vector + Box + QStash credentials, a Nebius API key, an OpenRouter key for vision.
+Requires: a Telegram bot token (@BotFather), Upstash Redis + Vector + Box + QStash credentials, a Nebius API key, an OpenRouter key for vision. Optional: an Upstash Blob token — the bucket **must be public**, a private one has no shareable URL — for `publish_page`, a MapToAgent key for `publish_map` (`POST https://maptoagent.xyz/v1/register`).
 
 **Caveat:** if the production webhook is registered, Telegram sends no updates to a long-poller. Delete the webhook while developing, restore it after:
 

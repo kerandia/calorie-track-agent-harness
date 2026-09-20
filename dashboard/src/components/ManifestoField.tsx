@@ -18,7 +18,7 @@ const SENTENCES = [
   "A photo of your plate is a log entry.",
   "No forms. No barcode scanning. No database of 4,000 yogurts.",
   "Say it like you'd say it to a friend, and it's counted.",
-  "Sezo reads the plate, estimates the calories, writes it down.",
+  "Sezar reads the plate, estimates the calories, writes it down.",
   "Wrong guess? Say so. It's a lentil waffle, not a rice cake.",
   "That was yesterday, not today. Moved. Both days corrected.",
   "Smaller portion. Fixed. You missed the rice. Added.",

@@ -14,7 +14,7 @@ export default async function Login() {
       <div className="header">
         <h1 className="h1">
           <a href="/" style={{ color: "inherit" }}>
-            🍎 Sezo
+            🍎 Sezar
           </a>
         </h1>
       </div>
@@ -46,7 +46,7 @@ export default async function Login() {
             target="_blank"
             rel="noreferrer"
           >
-            Start chatting with Sezo on Telegram →
+            Start chatting with Sezar on Telegram →
           </a>
         </p>
       </div>

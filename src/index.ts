@@ -36,11 +36,14 @@ async function handleAgentTurn(
   const imageNote = msg.image ? " [+image]" : "";
   console.log(`[${msg.tenantId}]${imageNote} ${msg.text || "(no caption)"}`);
   try {
-    const res = await fetch(`${flueUrl}/agents/chat/${msg.messageId}`, {
+    // <id> = Flue instance id = session key component: one per tenant, not per message.
+    const res = await fetch(`${flueUrl}/agents/chat/${encodeURIComponent(msg.tenantId)}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         tenantId: msg.tenantId,
+        channel: "telegram",
+        externalMessageId: String(msg.messageId),
         text: msg.text,
         images: msg.image ? [msg.image] : undefined,
       }),

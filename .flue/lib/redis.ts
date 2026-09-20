@@ -482,6 +482,8 @@ export type UserProfile = {
   allergies?: string[];
   likes?: string[];
   dislikes?: string[];
+  /** Home base, e.g. "Kreuzberg, Berlin" — anchors "near me" and trip planning. */
+  location?: string;
   timezone?: string;
   onboarded_at?: string;
 };
@@ -531,6 +533,7 @@ export async function getProfile(tenantId: string): Promise<UserProfile> {
   profile.allergies = parseStringArray(raw.allergies);
   profile.likes = parseStringArray(raw.likes);
   profile.dislikes = parseStringArray(raw.dislikes);
+  if (raw.location) profile.location = raw.location;
   if (raw.timezone) profile.timezone = raw.timezone;
   if (raw.onboarded_at) profile.onboarded_at = raw.onboarded_at;
   return profile;
@@ -557,6 +560,7 @@ export async function updateProfile(
   if (patch.likes !== undefined) flat.likes = JSON.stringify(patch.likes);
   if (patch.dislikes !== undefined)
     flat.dislikes = JSON.stringify(patch.dislikes);
+  if (patch.location !== undefined) flat.location = patch.location;
   if (patch.timezone !== undefined) flat.timezone = patch.timezone;
   if (patch.onboarded_at !== undefined) flat.onboarded_at = patch.onboarded_at;
 
@@ -625,6 +629,7 @@ export function summarizeProfile(profile: UserProfile): string {
   if (profile.weight_kg !== undefined) demo.push(`${profile.weight_kg}kg`);
   if (demo.length) parts.push(demo.join(" "));
   if (profile.activity_level) parts.push(`${profile.activity_level} activity`);
+  if (profile.location) parts.push(`based in ${profile.location}`);
   const goal = computeKcalGoal(profile);
   if (goal) parts.push(`~${goal} kcal/day target`);
   if (profile.allergies?.length)
@@ -684,6 +689,122 @@ export async function getRecentPhotos(
   return rows
     .filter((p) => p && typeof p.at === "string" && Date.parse(p.at) >= cutoff)
     .slice(0, limit);
+}
+
+// ── Artifact registry ─────────────────────────────────────────────────────
+//
+// Things the agent has published for a user and can revisit: hosted HTML
+// pages (Upstash Blob) and interactive maps (maproom). The hosts are storage;
+// this is the index — it's how "update my Lisbon map" finds the right id and
+// how tenancy is enforced (the model only ever sees ids from this list).
+
+export type ArtifactKind = "page" | "map";
+
+export type ArtifactRecord = {
+  id: string;
+  kind: ArtifactKind;
+  title: string;
+  url: string;
+  /** maproom artifact id, or the blob path of a page. */
+  external_id: string;
+  /** maproom version (maps only). */
+  version?: number;
+  created_at: string;
+  updated_at: string;
+};
+
+const assertArtifactId = (id: string): void => {
+  // Accept old eight-character ids as well as new full UUIDs. No Redis separators.
+  if (!/^(?:[a-f0-9]{8}|[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12})$/.test(id)) {
+    throw new Error("Invalid artifact id");
+  }
+};
+
+export async function recordArtifact(
+  tenantId: string,
+  input: Omit<ArtifactRecord, "id" | "created_at" | "updated_at">,
+): Promise<ArtifactRecord> {
+  const now = new Date().toISOString();
+  const rec: ArtifactRecord = { ...input, id: crypto.randomUUID(), created_at: now, updated_at: now };
+  const fields: Record<string, string | number> = {
+    kind: rec.kind,
+    title: rec.title,
+    url: rec.url,
+    external_id: rec.external_id,
+    created_at: rec.created_at,
+    updated_at: rec.updated_at,
+  };
+  if (rec.version !== undefined) fields.version = rec.version;
+  const pipe = getRedis().pipeline();
+  pipe.hset(k(tenantId, "artifact", rec.id), fields);
+  pipe.zadd(k(tenantId, "artifacts"), { score: Date.parse(now), member: rec.id });
+  await pipe.exec();
+  return rec;
+}
+
+export async function touchArtifact(
+  tenantId: string,
+  id: string,
+  patch: { title?: string; version?: number; url?: string },
+): Promise<void> {
+  assertArtifactId(id);
+  const fields: Record<string, string | number> = {
+    updated_at: new Date().toISOString(),
+  };
+  if (patch.title !== undefined) fields.title = patch.title;
+  if (patch.version !== undefined) fields.version = patch.version;
+  if (patch.url !== undefined) fields.url = patch.url;
+  await getRedis().hset(k(tenantId, "artifact", id), fields);
+}
+
+const parseArtifact = (id: string, r: Record<string, string> | null): ArtifactRecord | null => {
+  if (!r || Object.keys(r).length === 0) return null;
+  return {
+    id,
+    kind: (r.kind as ArtifactKind) ?? "page",
+    title: r.title ?? "",
+    url: r.url ?? "",
+    external_id: r.external_id ?? "",
+    version: r.version !== undefined && r.version !== "" ? Number(r.version) : undefined,
+    created_at: r.created_at ?? "",
+    updated_at: r.updated_at ?? r.created_at ?? "",
+  };
+};
+
+export async function getArtifact(
+  tenantId: string,
+  id: string,
+): Promise<ArtifactRecord | null> {
+  assertArtifactId(id);
+  const r = await getRedis().hgetall<Record<string, string>>(k(tenantId, "artifact", id));
+  return parseArtifact(id, r);
+}
+
+/** Newest first. */
+export async function listArtifacts(
+  tenantId: string,
+  limit = 10,
+  offset = 0,
+): Promise<ArtifactRecord[]> {
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100 || !Number.isSafeInteger(offset) || offset < 0) throw new Error("Invalid pagination");
+  const ids = (await getRedis().zrange(k(tenantId, "artifacts"), offset, offset + limit - 1, {
+    rev: true,
+  })) as string[];
+  if (ids.length === 0) return [];
+  const pipe = getRedis().pipeline();
+  for (const id of ids) pipe.hgetall(k(tenantId, "artifact", id));
+  const rows = await pipe.exec();
+  return rows
+    .map((row, i) => parseArtifact(ids[i]!, row as Record<string, string> | null))
+    .filter((a): a is ArtifactRecord => a !== null);
+}
+
+export async function deleteArtifactRecord(tenantId: string, id: string): Promise<void> {
+  assertArtifactId(id);
+  const pipe = getRedis().pipeline();
+  pipe.del(k(tenantId, "artifact", id));
+  pipe.zrem(k(tenantId, "artifacts"), id);
+  await pipe.exec();
 }
 
 export { todayUTC };

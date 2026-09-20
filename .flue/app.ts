@@ -12,7 +12,8 @@ import {
 import { createLoginToken } from "./lib/loginToken.js";
 import { cleanForSpeech, synthesize } from "./lib/fishAudio.js";
 import { transcribeVoice } from "./lib/stt.js";
-import { MAIN_MODEL_ID } from "./lib/models.js";
+import { MAIN_MODEL_CONTEXT_WINDOW, MAIN_MODEL_ID } from "./lib/models.js";
+import { assertTenantId, toAgentMessage } from "./lib/message.js";
 import {
   acquireTurnLock,
   inboxLength,
@@ -26,21 +27,65 @@ import {
 
 // Structured run telemetry → Cloud Run Logs Explorer (queryable JSON lines).
 // This is the observability layer; no external platform needed at this scale.
+// One line per model call (`llm_turn`: duration, tokens, stop reason), one per
+// tool call (`tool_call`: name, duration, error, result size), one per run.
+// Without these, a 5-minute turn was a black box.
 observe((event) => {
-  if (event.type !== "run_end") return;
-  const e = event as unknown as {
-    runId?: string;
-    isError?: boolean;
-    durationMs?: number;
-  };
-  console.log(
-    JSON.stringify({
-      evt: "agent_run_end",
-      runId: e.runId,
-      isError: e.isError ?? false,
-      durationMs: e.durationMs,
-    }),
-  );
+  const e = event as unknown as Record<string, unknown> & { type: string };
+  switch (event.type) {
+    case "run_end":
+      console.log(
+        JSON.stringify({
+          evt: "agent_run_end",
+          runId: e.runId,
+          isError: e.isError ?? false,
+          durationMs: e.durationMs,
+        }),
+      );
+      return;
+    case "turn": {
+      const usage = (e.usage ?? {}) as Record<string, unknown>;
+      console.log(
+        JSON.stringify({
+          evt: "llm_turn",
+          runId: e.runId,
+          durationMs: e.durationMs,
+          model: e.model,
+          stopReason: e.stopReason,
+          isError: e.isError ?? false,
+          input: usage.input ?? usage.inputTokens,
+          output: usage.output ?? usage.outputTokens,
+          ...(e.error ? { error: String(e.error).slice(0, 200) } : {}),
+        }),
+      );
+      return;
+    }
+    case "tool_call": {
+      const result = e.result;
+      const preview =
+        typeof result === "string"
+          ? result
+          : Array.isArray((result as { content?: unknown[] })?.content)
+            ? ((result as { content: Array<{ text?: string }> }).content
+                .map((b) => b.text ?? "")
+                .join(" "))
+            : JSON.stringify(result ?? "");
+      console.log(
+        JSON.stringify({
+          evt: "tool_call",
+          runId: e.runId,
+          tool: e.toolName,
+          durationMs: e.durationMs,
+          isError: e.isError ?? false,
+          resultChars: preview.length,
+          result: preview.slice(0, 160),
+        }),
+      );
+      return;
+    }
+    default:
+      return;
+  }
 });
 
 /**
@@ -93,7 +138,7 @@ registerProvider("nebius", {
   maxTokens: 8000,
   models: {
     [MAIN_MODEL_ID]: {
-      contextWindow: 1048576,
+      contextWindow: MAIN_MODEL_CONTEXT_WINDOW,
       maxTokens: 8000,
     },
     "Qwen/Qwen3-30B-A3B-Instruct-2507": {
@@ -106,6 +151,43 @@ registerProvider("nebius", {
     },
   },
 });
+
+// ── Reasoning effort for agent turns ──────────────────────────────────────
+//
+// GLM-5.3-Flash "thinks" before every answer and those hidden tokens are the
+// dominant latency cost of a turn: one map revision produced ~3k reasoning
+// tokens on top of a 1.5k-token tool call (147s wall clock). Nebius honours
+// OpenAI's `reasoning_effort` (measured: "low" → ~1 reasoning token, same
+// tool-call quality), but Flue registers custom models with reasoning:false
+// and pi-ai then never sends the field. There is no hook for it, so the
+// field is added at the HTTP layer, only for chat-completion requests to
+// Nebius that carry `tools` (agent turns — the vision call has none and does
+// better with thinking on). NEBIUS_REASONING_EFFORT=off disables this.
+{
+  const NEBIUS_CHAT = "https://api.tokenfactory.nebius.com/v1/chat/completions";
+  const effort = (process.env.NEBIUS_REASONING_EFFORT ?? "low").toLowerCase();
+  if (effort !== "off") {
+    const realFetch = globalThis.fetch.bind(globalThis);
+    globalThis.fetch = (async (input, init) => {
+      const url =
+        typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      const body = init?.body;
+      if (url === NEBIUS_CHAT && typeof body === "string" && body.includes('"tools"')) {
+        try {
+          const json = JSON.parse(body) as Record<string, unknown>;
+          if (json.model === MAIN_MODEL_ID && json.reasoning_effort === undefined) {
+            json.reasoning_effort = effort;
+            return realFetch(input, { ...init, body: JSON.stringify(json) });
+          }
+        } catch {
+          /* not JSON — pass through untouched */
+        }
+      }
+      return realFetch(input, init);
+    }) as typeof fetch;
+    console.log(`[llm] reasoning_effort=${effort} for ${MAIN_MODEL_ID} tool turns`);
+  }
+}
 
 // ── Telegram ingestion pipeline (scale-to-zero) ────────────────────────────
 //
@@ -147,10 +229,22 @@ const sleep = (ms: number): Promise<void> =>
 
 // Budget: Cloud Run's request timeout is 600s. One drain request may handle
 // several batches; it stops STARTING new ones after DRAIN_DEADLINE_MS and hands
-// the remainder to a fresh request, so lock TTL > deadline + one agent turn.
-const LOCK_TTL_S = 570;
-const DRAIN_DEADLINE_MS = 240_000;
-const AGENT_TIMEOUT_MS = 300_000;
+// the remainder to a fresh request. A batch started at the deadline may still
+// run a full agent turn, so deadline + turn timeout must stay under 600s, and
+// the lock TTL must outlive that sum (a turn that publishes a map or writes a
+// page has been measured at 2-5 minutes; the old 300s cut those off after the
+// work was done and told the user the model "hiccuped").
+const LOCK_TTL_S = 600;
+const DRAIN_DEADLINE_MS = 60_000;
+const AGENT_TIMEOUT_MS = 480_000;
+// After this long in one turn, send a short heads-up so the user isn't staring
+// at a typing indicator wondering whether anything is happening.
+const SLOW_TURN_NOTE_MS = 40_000;
+const SLOW_TURN_NOTES = [
+  "on it — this one takes me a minute",
+  "still working, give me a moment",
+  "building it now, hang tight",
+];
 
 // Burst settling: wait until the newest inbox item is this old before acting,
 // so an album (Telegram delivers each photo as its own update, ~0.2-1s apart)
@@ -223,7 +317,7 @@ app.post("/tg/webhook", async (c) => {
   const fresh = await redis().set(dedupeKey, "1", { nx: true, ex: 3600 });
   if (fresh !== "OK") return c.json({ ok: true });
 
-  const tenantId = String(msg.from.id);
+  const tenantId = assertTenantId(String(msg.from.id));
   const item: InboxItem = {
     update_id: update.update_id,
     received_at: Date.now(),
@@ -401,24 +495,45 @@ async function handleBatch(
     console.log(`[${tenantId}] ${note} ${text || "(no caption)"}`);
 
     const port = process.env.PORT ?? "8080";
-    const res = await fetch(
-      `http://127.0.0.1:${port}/agents/chat/${turnItems[0]!.update_id}`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-internal-secret": env("INTERNAL_API_SECRET"),
+    const envelope = toAgentMessage({
+      tenantId,
+      channel: "telegram",
+      externalMessageId: String(turnItems[0]!.update_id),
+      text,
+    });
+    const slowNote = setTimeout(() => {
+      void sendMessage(
+        chatId,
+        SLOW_TURN_NOTES[Math.floor(Math.random() * SLOW_TURN_NOTES.length)]!,
+      );
+    }, SLOW_TURN_NOTE_MS);
+    let res: Response;
+    try {
+      // The URL's <id> segment is Flue's agent INSTANCE id and part of the
+      // session storage key. It used to be the Telegram update_id, so every
+      // message opened a brand-new session and the bot had no conversation
+      // memory at all (45 one-turn sessions for one user). One instance per
+      // tenant = one continuous conversation per tenant.
+      res = await fetch(
+        `http://127.0.0.1:${port}/agents/chat/${encodeURIComponent(tenantId)}`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-internal-secret": env("INTERNAL_API_SECRET"),
+          },
+          body: JSON.stringify({
+            ...envelope,
+            images,
+            voice: wasVoice,
+            photosDropped: photosDropped > 0 ? photosDropped : undefined,
+          }),
+          signal: AbortSignal.timeout(AGENT_TIMEOUT_MS),
         },
-        body: JSON.stringify({
-          tenantId,
-          text,
-          images,
-          voice: wasVoice,
-          photosDropped: photosDropped > 0 ? photosDropped : undefined,
-        }),
-        signal: AbortSignal.timeout(AGENT_TIMEOUT_MS),
-      },
-    );
+      );
+    } finally {
+      clearTimeout(slowNote);
+    }
 
     if (!res.ok) {
       console.error(`[tg] agent ${res.status}: ${await res.text().catch(() => "")}`);

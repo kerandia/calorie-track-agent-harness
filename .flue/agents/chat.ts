@@ -1,6 +1,7 @@
 import type { FlueContext, ToolDef } from "@flue/runtime";
 import { Type } from "@flue/runtime";
 import * as v from "valibot";
+import { createArtifactCapability } from "../capabilities/artifacts.js";
 import {
   deleteMealById,
   getActiveAssumptions,
@@ -14,6 +15,7 @@ import {
   getRecentMeals,
   getRecentPhotos,
   isOnboarded,
+  listArtifacts,
   logMeal,
   noteAssumption,
   recordMealFeedback,
@@ -24,6 +26,7 @@ import {
   updateAssumptionStatus,
   updateMealById,
   updateProfile,
+  type ArtifactRecord,
   type MealRecord,
   type PhotoMemory,
 } from "../lib/redis.js";
@@ -38,6 +41,8 @@ import { redisSessionStore } from "../lib/sessionStore.js";
 import {
   DEFAULT_VISION_FALLBACK_MODEL,
   MAIN_MODEL,
+  MAIN_MODEL_CONTEXT_WINDOW,
+  WORKING_CONTEXT_TOKENS,
 } from "../lib/models.js";
 
 export const triggers = { webhook: true };
@@ -51,6 +56,8 @@ const ImageSchema = v.object({
 // several messages joined), zero or more photos, maybe a voice note.
 const InputSchema = v.object({
   tenantId: v.string(),
+  channel: v.optional(v.picklist(["telegram", "whatsapp", "imessage", "web", "mcp"] as const)),
+  externalMessageId: v.optional(v.string()),
   text: v.string(),
   /** Legacy single-image shape (still sent by the local long-polling bot). */
   image: v.optional(ImageSchema),
@@ -386,6 +393,12 @@ export default async function chat({ init, payload }: FlueContext) {
       ),
       likes: Type.Optional(Type.Array(Type.String())),
       dislikes: Type.Optional(Type.Array(Type.String())),
+      location: Type.Optional(
+        Type.String({
+          description:
+            "Where the user is based, e.g. 'Kreuzberg, Berlin'. Set when they say where they live; it anchors 'near me' and trip planning.",
+        }),
+      ),
       timezone: Type.Optional(
         Type.String({
           description:
@@ -538,14 +551,27 @@ export default async function chat({ init, payload }: FlueContext) {
     },
   };
 
+  const artifacts = createArtifactCapability(input.tenantId, async (path) => {
+    if (!boxRef.current) throw new Error("No sandbox is open; pass HTML directly");
+    return boxRef.current.files.read(path);
+  });
+  const approvalReply = await artifacts.handleApproval(input.text);
+  if (approvalReply !== undefined) return { reply: approvalReply };
+
   const harness = await init({
     model: MAIN_MODEL,
-    // Sezo's persona and standing rules live in .flue/roles/sezo.md and ride
+    // Sezar's persona and standing rules live in .flue/roles/sezar.md and ride
     // in the SYSTEM prompt. They used to be prepended to every user message,
     // so the transcript was ~90% repeated instructions and the model kept
     // losing what the user had actually sent a few turns earlier.
-    role: "sezo",
+    role: "sezar",
     persist: redisSessionStore,
+    // Compact once the transcript passes WORKING_CONTEXT_TOKENS (Flue triggers
+    // at contextWindow - reserveTokens), keeping the last ~10k tokens verbatim.
+    compaction: {
+      reserveTokens: MAIN_MODEL_CONTEXT_WINDOW - WORKING_CONTEXT_TOKENS,
+      keepRecentTokens: 10_000,
+    },
     tools: [
       logMealTool,
       updateMealTool,
@@ -559,6 +585,7 @@ export default async function chat({ init, payload }: FlueContext) {
       getProfileTool,
       runShellTool,
       runCodeTool,
+      ...artifacts.tools,
     ],
   });
   const session = await harness.session(input.tenantId);
@@ -578,7 +605,7 @@ export default async function chat({ init, payload }: FlueContext) {
           fallbackModel: fallbackVisionModel,
         });
         console.log(
-          `[chat] vision ${i + 1}/${images.length} (${vision.model}) [${vision.kind}]: ${vision.description.slice(0, 120)}`,
+          `[chat] vision ${i + 1}/${images.length} (${vision.model}) [${vision.kind}]`,
         );
         return vision;
       } catch (err) {
@@ -598,10 +625,14 @@ export default async function chat({ init, payload }: FlueContext) {
   // Photo memory: read BEFORE storing this turn's photos, so the list is
   // strictly "photos from earlier" and this turn's are presented separately.
   let earlierPhotos: PhotoMemory[] = [];
+  let recentArtifacts: ArtifactRecord[] = [];
   try {
-    earlierPhotos = await getRecentPhotos(input.tenantId, 48 * 60 * 60 * 1000, 6);
+    [earlierPhotos, recentArtifacts] = await Promise.all([
+      getRecentPhotos(input.tenantId, 48 * 60 * 60 * 1000, 6),
+      listArtifacts(input.tenantId, 5),
+    ]);
   } catch (err) {
-    console.warn("[chat] photo memory fetch failed:", err);
+    console.warn("[chat] photo/artifact memory fetch failed:", err);
   }
   const newPhotoMemories: PhotoMemory[] = visions.flatMap((vis) =>
     vis
@@ -676,7 +707,7 @@ export default async function chat({ init, payload }: FlueContext) {
   }
   if (!onboarded) {
     ctx.push(
-      `[ONBOARDING NEEDED] User is not fully onboarded. Still missing: ${missingFields.join(", ")}. Ask 1-2 short, friendly questions per turn to gather these. Save answers via update_profile immediately.`,
+      `[OPTIONAL HEALTH PROFILE] Missing: ${missingFields.join(", ")}. Only ask when needed for the user's current health question. Never interrupt travel, maps, pages, or other tasks for health onboarding. Save voluntarily supplied facts via update_profile.`,
     );
   }
   if (pendingFeedback.length > 0) {
@@ -697,6 +728,19 @@ export default async function chat({ init, payload }: FlueContext) {
             );
             const cap = p.caption ? ` (their caption: "${p.caption}")` : "";
             return `- ${ago} ago [${p.kind}]${cap}: ${p.description}`;
+          })
+          .join("\n"),
+    );
+  }
+  if (recentArtifacts.length > 0) {
+    ctx.push(
+      `Pages/maps you published for this user (newest first; update these instead of making duplicates):\n` +
+        recentArtifacts
+          .map((a) => {
+            const ago = formatElapsed(
+              Math.max(0, Math.floor((now.getTime() - Date.parse(a.updated_at)) / 1000)),
+            );
+            return `- [${a.id}] ${a.kind} "${a.title}" ${a.url} (${ago} ago)`;
           })
           .join("\n"),
     );

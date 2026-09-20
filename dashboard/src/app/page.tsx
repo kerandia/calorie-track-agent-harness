@@ -17,9 +17,9 @@ export default async function Landing() {
   return (
     <div className="mani">
       <nav className="m-nav" aria-label="Primary navigation">
-        <a className="m-logo" href="/" aria-label="Sezo home">
+        <a className="m-logo" href="/" aria-label="Sezar home">
           <span className="m-logo-mark" aria-hidden="true">S</span>
-          <span>sezo</span>
+          <span>sezar</span>
         </a>
         <div className="m-nav-links">
           <a href="/classic">the calm version</a>
@@ -37,16 +37,16 @@ export default async function Landing() {
           <h1 id="manifesto-title">
             You eat.<br />
             You text.<br />
-            <em>Sezo remembers.</em>
+            <em>Sezar remembers.</em>
           </h1>
           <p className="m-deck">
-            Send a sentence, a photo, or a voice note. Sezo counts the meal,
+            Send a sentence, a photo, or a voice note. Sezar counts the meal,
             fixes mistakes when you correct it, and quietly turns your days
             into a health record worth keeping.
           </p>
           <div className="m-actions">
             <a className="m-action m-action-primary" href={TG_URL} target="_blank" rel="noreferrer">
-              Open Sezo in Telegram <span aria-hidden="true">↗</span>
+              Open Sezar in Telegram <span aria-hidden="true">↗</span>
             </a>
             <a className="m-action m-action-secondary" href="/login">
               View your dashboard <span aria-hidden="true">→</span>

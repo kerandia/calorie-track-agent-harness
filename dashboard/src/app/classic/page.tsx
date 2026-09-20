@@ -22,16 +22,16 @@ export default async function ClassicLanding() {
   return (
     <div className="landing">
       <nav className="l-nav" aria-label="Primary navigation">
-        <a className="l-logo" href="/" aria-label="Sezo home">
+        <a className="l-logo" href="/" aria-label="Sezar home">
           <span className="l-logo-mark" aria-hidden="true">S</span>
-          <span>sezo</span>
+          <span>sezar</span>
         </a>
         <div className="l-nav-links">
           <a href="#inside">What you get</a>
           <a href="#how">How it works</a>
           <a href="/login">Log in</a>
           <a className="l-nav-cta" href={TG_URL} target="_blank" rel="noreferrer">
-            Try Sezo <span aria-hidden="true">↗</span>
+            Try Sezar <span aria-hidden="true">↗</span>
           </a>
         </div>
       </nav>
@@ -45,7 +45,7 @@ export default async function ClassicLanding() {
               <em>More knowing.</em>
             </h1>
             <p className="l-sub l-hero-sub">
-              Tell Sezo what you ate—in a text, photo, or voice note. It keeps
+              Tell Sezar what you ate—in a text, photo, or voice note. It keeps
               the numbers, remembers the context, and shows you the pattern
               without turning lunch into paperwork.
             </p>
@@ -65,14 +65,14 @@ export default async function ClassicLanding() {
             </div>
           </div>
 
-          <div className="l-demo" aria-label="Example conversation with Sezo">
+          <div className="l-demo" aria-label="Example conversation with Sezar">
             <div className="l-demo-glow" aria-hidden="true" />
             <div className="l-phone">
               <div className="l-phone-top">
                 <span className="l-phone-back" aria-hidden="true">‹</span>
                 <span className="l-phone-avatar" aria-hidden="true">S</span>
                 <div>
-                  <div className="l-phone-name">Sezo</div>
+                  <div className="l-phone-name">Sezar</div>
                   <div className="l-phone-status"><span /> online</div>
                 </div>
                 <span className="l-phone-menu" aria-hidden="true">•••</span>
@@ -99,13 +99,13 @@ export default async function ClassicLanding() {
                 </div>
               </div>
               <div className="l-composer" aria-hidden="true">
-                <span>Message Sezo…</span><i>↑</i>
+                <span>Message Sezar…</span><i>↑</i>
               </div>
             </div>
           </div>
         </header>
 
-        <section className="l-proofbar" aria-label="Ways to use Sezo">
+        <section className="l-proofbar" aria-label="Ways to use Sezar">
           <div><span>01</span><strong>Text, photo, or voice</strong><small>Log however feels fastest.</small></div>
           <div><span>02</span><strong>Correct it naturally</strong><small>“Half the rice” is enough.</small></div>
           <div><span>03</span><strong>See the whole month</strong><small>Patterns, not scattered entries.</small></div>
@@ -118,7 +118,7 @@ export default async function ClassicLanding() {
               Tracking usually fails at the tracking part.
             </h2>
             <p>
-              Sezo removes the taps, searches, forms, and tiny decisions between
+              Sezar removes the taps, searches, forms, and tiny decisions between
               eating something and remembering it. Speak normally. The log
               stays structured anyway.
             </p>
@@ -181,7 +181,7 @@ export default async function ClassicLanding() {
             <div>
               <p className="l-card-kicker">Hands full?</p>
               <h3>Just say it.</h3>
-              <p>Voice notes go through the same memory and meal log. Sezo can answer back in voice, too.</p>
+              <p>Voice notes go through the same memory and meal log. Sezar can answer back in voice, too.</p>
             </div>
           </article>
         </section>
@@ -193,7 +193,7 @@ export default async function ClassicLanding() {
           </div>
           <ol className="l-steps">
             <li><span>01</span><h3>Say what you ate</h3><p>A rough sentence is enough. Add a photo or voice note whenever that&apos;s easier.</p></li>
-            <li><span>02</span><h3>Let Sezo do the admin</h3><p>Calories and macros are estimated, logged, and corrected in the same conversation.</p></li>
+            <li><span>02</span><h3>Let Sezar do the admin</h3><p>Calories and macros are estimated, logged, and corrected in the same conversation.</p></li>
             <li><span>03</span><h3>Notice the pattern</h3><p>Open your private dashboard to see daily totals, meal history, and the month taking shape.</p></li>
           </ol>
         </section>
@@ -202,16 +202,16 @@ export default async function ClassicLanding() {
           <div className="l-final-orbit" aria-hidden="true"><span /><span /><span /></div>
           <p className="l-section-label">Start with the next thing you eat</p>
           <h2 className={`${serif.className} l-h2`}>One message. That&apos;s the whole workflow.</h2>
-          <p>Open Sezo in Telegram and log your next meal before you forget it.</p>
+          <p>Open Sezar in Telegram and log your next meal before you forget it.</p>
           <a className="l-btn l-btn-light" href={TG_URL} target="_blank" rel="noreferrer">
-            Meet Sezo in Telegram <span aria-hidden="true">↗</span>
+            Meet Sezar in Telegram <span aria-hidden="true">↗</span>
           </a>
         </section>
       </main>
 
       <footer className="l-footer">
-        <a className="l-logo" href="/" aria-label="Sezo home">
-          <span className="l-logo-mark" aria-hidden="true">S</span><span>sezo</span>
+        <a className="l-logo" href="/" aria-label="Sezar home">
+          <span className="l-logo-mark" aria-hidden="true">S</span><span>sezar</span>
         </a>
         <p>A quieter way to understand what you eat.</p>
         <div><a href={TG_URL} target="_blank" rel="noreferrer">Telegram</a><a href="/login">Dashboard</a><a href="/">Manifesto</a></div>
