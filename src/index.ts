@@ -1,5 +1,6 @@
 import { TelegramChannel } from "./channel/telegram.js";
 import { createLoginToken } from "./login.js";
+import { formatInboundMessageLog, formatOutboundReplyLog } from "./logging.js";
 
 const token = process.env.TELEGRAM_BOT_TOKEN;
 const flueUrl = process.env.FLUE_URL ?? "http://localhost:3583";
@@ -33,8 +34,13 @@ async function handleAgentTurn(
   msg: { tenantId: string; text: string; messageId: number; image?: unknown },
   reply: (text: string) => Promise<void>,
 ): Promise<void> {
-  const imageNote = msg.image ? " [+image]" : "";
-  console.log(`[${msg.tenantId}]${imageNote} ${msg.text || "(no caption)"}`);
+  console.log(
+    formatInboundMessageLog({
+      tenantId: msg.tenantId,
+      text: msg.text,
+      imageCount: msg.image ? 1 : 0,
+    }),
+  );
   try {
     // <id> = Flue instance id = session key component: one per tenant, not per message.
     const res = await fetch(`${flueUrl}/agents/chat/${encodeURIComponent(msg.tenantId)}`, {
@@ -51,7 +57,13 @@ async function handleAgentTurn(
     });
     if (!res.ok) {
       const body = await res.text();
-      console.error(`Flue ${res.status}: ${body}`);
+      console.error(
+        JSON.stringify({
+          evt: "agent_request_failed",
+          status: res.status,
+          responseChars: body.length,
+        }),
+      );
       const friendly =
         res.status >= 500
           ? "The model just hiccuped on me. Try again in a moment."
@@ -66,12 +78,23 @@ async function handleAgentTurn(
     };
     const replyText = data.result?.reply;
     if (!replyText) {
-      console.error(`Flue response missing result.reply (run ${runId}):`, JSON.stringify(data));
+      console.error(
+        JSON.stringify({
+          evt: "agent_reply_missing",
+          runId,
+          responseKeys: Object.keys(data),
+        }),
+      );
       await reply("(no reply)");
       return;
     }
-    const preview = replyText.length > 200 ? replyText.slice(0, 200) + "..." : replyText;
-    console.log(`[${msg.tenantId}] <- (run ${runId}) ${preview}`);
+    console.log(
+      formatOutboundReplyLog({
+        tenantId: msg.tenantId,
+        text: replyText,
+        runId,
+      }),
+    );
     await reply(replyText);
   } catch (err) {
     const isTimeout = err instanceof DOMException && err.name === "TimeoutError";

@@ -12,6 +12,7 @@
     "dev:bot": "tsx watch --env-file=.env src/index.ts",
     "build": "tsc && flue build --target node",
     "start": "concurrently -n agent,bot \"node --env-file=.env dist/server.mjs\" \"node --env-file=.env dist/index.js\"",
+    "test": "tsc --noEmit -p tsconfig.test.json && node --import tsx --test test/*.test.ts",
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.flue.json"
   },
   "dependencies": {

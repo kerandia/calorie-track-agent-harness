@@ -15,6 +15,11 @@ import { transcribeVoice } from "./lib/stt.js";
 import { MAIN_MODEL_CONTEXT_WINDOW, MAIN_MODEL_ID } from "./lib/models.js";
 import { assertTenantId, toAgentMessage } from "./lib/message.js";
 import {
+  formatInboundMessageLog,
+  formatOutboundReplyLog,
+  toolResultCharCount,
+} from "../src/logging.js";
+import {
   acquireTurnLock,
   inboxLength,
   peekInbox,
@@ -61,15 +66,6 @@ observe((event) => {
       return;
     }
     case "tool_call": {
-      const result = e.result;
-      const preview =
-        typeof result === "string"
-          ? result
-          : Array.isArray((result as { content?: unknown[] })?.content)
-            ? ((result as { content: Array<{ text?: string }> }).content
-                .map((b) => b.text ?? "")
-                .join(" "))
-            : JSON.stringify(result ?? "");
       console.log(
         JSON.stringify({
           evt: "tool_call",
@@ -77,8 +73,7 @@ observe((event) => {
           tool: e.toolName,
           durationMs: e.durationMs,
           isError: e.isError ?? false,
-          resultChars: preview.length,
-          result: preview.slice(0, 160),
+          resultChars: toolResultCharCount(e.result),
         }),
       );
       return;
@@ -485,14 +480,15 @@ async function handleBatch(
       return;
     }
 
-    const note = [
-      images.length ? `[+${images.length} image${images.length === 1 ? "" : "s"}]` : "",
-      wasVoice ? "[voice]" : "",
-      turnItems.length > 1 ? `[burst of ${turnItems.length}]` : "",
-    ]
-      .filter(Boolean)
-      .join(" ");
-    console.log(`[${tenantId}] ${note} ${text || "(no caption)"}`);
+    console.log(
+      formatInboundMessageLog({
+        tenantId,
+        text,
+        imageCount: images.length,
+        voice: wasVoice,
+        burstSize: turnItems.length,
+      }),
+    );
 
     const port = process.env.PORT ?? "8080";
     const envelope = toAgentMessage({
@@ -536,7 +532,14 @@ async function handleBatch(
     }
 
     if (!res.ok) {
-      console.error(`[tg] agent ${res.status}: ${await res.text().catch(() => "")}`);
+      const errorBody = await res.text().catch(() => "");
+      console.error(
+        JSON.stringify({
+          evt: "agent_request_failed",
+          status: res.status,
+          responseChars: errorBody.length,
+        }),
+      );
       await sendMessage(chatId, "the model just hiccuped on me — try again in a moment.");
       return; // don't retry LLM failures — user was told
     }
@@ -548,7 +551,7 @@ async function handleBatch(
       await sendMessage(chatId, "(no reply)");
       return;
     }
-    console.log(`[${tenantId}] <- (run ${runId}) ${reply.slice(0, 200)}`);
+    console.log(formatOutboundReplyLog({ tenantId, text: reply, runId }));
 
     // Poke mechanic: blank-line-separated thoughts become separate bubbles.
     const parts = reply
