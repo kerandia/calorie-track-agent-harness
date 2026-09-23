@@ -33,16 +33,16 @@ export default async function Landing() {
         <div className="m-wind m-wind-2" aria-hidden="true" />
 
         <section className="m-hero" aria-labelledby="manifesto-title">
-          <p className="m-kicker"><span aria-hidden="true" /> a food log that listens</p>
+          <p className="m-kicker"><span aria-hidden="true" /> no new app to learn</p>
           <h1 id="manifesto-title">
-            You eat.<br />
             You text.<br />
-            <em>Sezar remembers.</em>
+            Sezar works.<br />
+            <em>That&apos;s the product.</em>
           </h1>
           <p className="m-deck">
-            Send a sentence, a photo, or a voice note. Sezar counts the meal,
-            fixes mistakes when you correct it, and quietly turns your days
-            into a health record worth keeping.
+            Telegram is the interface. Log a meal, plan a trip, or ask for a
+            page you can reopen. This site is the record, not a second chat.
+            Health details stay optional until a health question needs them.
           </p>
           <div className="m-actions">
             <a className="m-action m-action-primary" href={TG_URL} target="_blank" rel="noreferrer">
@@ -53,15 +53,15 @@ export default async function Landing() {
             </a>
           </div>
           <ul className="m-proof" aria-label="Product highlights">
-            <li>No forms</li>
-            <li>Natural corrections</li>
-            <li>Your history, remembered</li>
+            <li>Start in Telegram</li>
+            <li>No form before help</li>
+            <li>Pages keep one look</li>
           </ul>
         </section>
 
         <div className="m-footnote" aria-hidden="true">
           <span>Move your cursor. The field moves with you.</span>
-          <span>Telegram-first nutrition companion</span>
+          <span>Telegram now. Other channels later.</span>
         </div>
       </main>
     </div>

@@ -2,9 +2,9 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Sezar — track calories by just texting",
+  title: "Sezar — text the agent, keep the record",
   description:
-    "A health agent on Telegram: text or photograph your meals, Sezar logs calories and macros, remembers what works for you, and turns it into a calendar.",
+    "Sezar lives in Telegram. Log meals, make plans, and reopen pages from chat. The dashboard is your record, not another conversation.",
 };
 
 export default function RootLayout({

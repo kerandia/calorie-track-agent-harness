@@ -20,7 +20,7 @@ export default async function Login() {
       </div>
       <div className="panel" style={{ textAlign: "center", padding: 40 }}>
         <p style={{ fontSize: 16, marginBottom: 8 }}>
-          See every day&apos;s meals and your calorie calendar.
+          This is the record: your month, your meals, and the way back to Telegram.
         </p>
         <p className="muted" style={{ marginBottom: 24 }}>
           Fastest way in: send <strong>/login</strong> to the bot on Telegram

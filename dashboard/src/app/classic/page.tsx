@@ -39,15 +39,15 @@ export default async function ClassicLanding() {
       <main>
         <header className="l-hero">
           <div className="l-hero-copy">
-            <p className="l-eyebrow"><span aria-hidden="true" /> Nutrition tracking, minus the admin</p>
+            <p className="l-eyebrow"><span aria-hidden="true" /> The chat is the product</p>
             <h1 className={`${serif.className} l-h1`}>
-              Less tracking.<br />
-              <em>More knowing.</em>
+              Text Sezar.<br />
+              <em>Keep the record here.</em>
             </h1>
             <p className="l-sub l-hero-sub">
-              Tell Sezar what you ate—in a text, photo, or voice note. It keeps
-              the numbers, remembers the context, and shows you the pattern
-              without turning lunch into paperwork.
+              Meals, plans, and pages start in Telegram. This site shows the
+              month and the work you already approved. You do not fill a health
+              form before Sezar can help.
             </p>
             <div className="l-cta-row">
               <a className="l-btn l-btn-primary" href={TG_URL} target="_blank" rel="noreferrer">
@@ -61,7 +61,7 @@ export default async function ClassicLanding() {
               <span className="l-avatar-stack" aria-hidden="true">
                 <i>🍳</i><i>🥗</i><i>🍝</i>
               </span>
-              <span>No new app to learn. Just the Telegram you already use.</span>
+              <span>Telegram is the way in. Email and other channels come later.</span>
             </div>
           </div>
 
@@ -105,22 +105,22 @@ export default async function ClassicLanding() {
           </div>
         </header>
 
-        <section className="l-proofbar" aria-label="Ways to use Sezar">
-          <div><span>01</span><strong>Text, photo, or voice</strong><small>Log however feels fastest.</small></div>
-          <div><span>02</span><strong>Correct it naturally</strong><small>“Half the rice” is enough.</small></div>
-          <div><span>03</span><strong>See the whole month</strong><small>Patterns, not scattered entries.</small></div>
+        <section className="l-proofbar" aria-label="How you reach Sezar">
+          <div><span>01</span><strong>Telegram</strong><small>The live conversation. Text, photo, or voice.</small></div>
+          <div><span>02</span><strong>Pages</strong><small>Plans you reopen. One design, every time.</small></div>
+          <div><span>03</span><strong>This dashboard</strong><small>The record. Reach it with /login.</small></div>
         </section>
 
         <section className="l-intro" id="inside">
           <p className="l-section-label">Built for real life</p>
           <div className="l-intro-grid">
             <h2 className={`${serif.className} l-h2`}>
-              Tracking usually fails at the tracking part.
+              The work happens in the chat you already open.
             </h2>
             <p>
-              Sezar removes the taps, searches, forms, and tiny decisions between
-              eating something and remembering it. Speak normally. The log
-              stays structured anyway.
+              Sezar logs a meal, drafts a plan, and prepares a page. You approve
+              anything that gets a public link. The calendar stays here so the
+              chat does not have to be the archive.
             </p>
           </div>
         </section>
@@ -189,20 +189,20 @@ export default async function ClassicLanding() {
         <section className="l-how" id="how">
           <div className="l-how-heading">
             <p className="l-section-label">Three small steps</p>
-            <h2 className={`${serif.className} l-h2`}>From lunch to useful data.</h2>
+            <h2 className={`${serif.className} l-h2`}>From one message to a record.</h2>
           </div>
           <ol className="l-steps">
-            <li><span>01</span><h3>Say what you ate</h3><p>A rough sentence is enough. Add a photo or voice note whenever that&apos;s easier.</p></li>
-            <li><span>02</span><h3>Let Sezar do the admin</h3><p>Calories and macros are estimated, logged, and corrected in the same conversation.</p></li>
-            <li><span>03</span><h3>Notice the pattern</h3><p>Open your private dashboard to see daily totals, meal history, and the month taking shape.</p></li>
+            <li><span>01</span><h3>Open Telegram</h3><p>That is the onboard. No profile form, and no second app.</p></li>
+            <li><span>02</span><h3>Say the job</h3><p>A meal, a correction, or a plan. Sezar prepares a page when the answer should outlive the chat.</p></li>
+            <li><span>03</span><h3>Keep the record here</h3><p>Send /login when you want the month. The dashboard does not become another conversation.</p></li>
           </ol>
         </section>
 
         <section className="l-final">
           <div className="l-final-orbit" aria-hidden="true"><span /><span /><span /></div>
           <p className="l-section-label">Start with the next thing you eat</p>
-          <h2 className={`${serif.className} l-h2`}>One message. That&apos;s the whole workflow.</h2>
-          <p>Open Sezar in Telegram and log your next meal before you forget it.</p>
+          <h2 className={`${serif.className} l-h2`}>One message. That&apos;s how it starts.</h2>
+          <p>Open Sezar in Telegram. The record can wait until you want it.</p>
           <a className="l-btn l-btn-light" href={TG_URL} target="_blank" rel="noreferrer">
             Meet Sezar in Telegram <span aria-hidden="true">↗</span>
           </a>
@@ -213,7 +213,7 @@ export default async function ClassicLanding() {
         <a className="l-logo" href="/" aria-label="Sezar home">
           <span className="l-logo-mark" aria-hidden="true">S</span><span>sezar</span>
         </a>
-        <p>A quieter way to understand what you eat.</p>
+        <p>Text the agent. Keep the record here.</p>
         <div><a href={TG_URL} target="_blank" rel="noreferrer">Telegram</a><a href="/login">Dashboard</a><a href="/">Manifesto</a></div>
       </footer>
     </div>
