@@ -6,6 +6,10 @@ password account. Telegram is the current channel: the verified `from.id` on an
 inbound bot update is the tenant key used by Redis, Flue sessions, Vector
 namespaces, inbox locks, and the dashboard login link.
 
+Choices from the October 2026 review (Photon, payments, places, Modal) are
+recorded in [product-decisions.md](product-decisions.md). This file stays the
+build order. Those choices are not implemented yet.
+
 ## What already exists
 
 - Telegram webhook ingestion with per-user ordering, deduplication, burst
