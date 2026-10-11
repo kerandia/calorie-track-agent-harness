@@ -8,6 +8,8 @@ export default async function LoginConfirm({
 }) {
   const sp = await searchParams;
   const token = typeof sp.token === "string" ? sp.token : "";
+  // Where Sezar's link should land (a dashboard tab or list); validated on POST.
+  const next = typeof sp.next === "string" ? sp.next : "";
 
   return (
     <div className="container">
@@ -19,6 +21,7 @@ export default async function LoginConfirm({
             </p>
             <form method="POST" action="/api/auth/code">
               <input type="hidden" name="token" value={token} />
+              {next ? <input type="hidden" name="next" value={next} /> : null}
               <button
                 className="btn"
                 type="submit"

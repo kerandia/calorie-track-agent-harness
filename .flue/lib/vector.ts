@@ -56,3 +56,12 @@ export async function semanticSearchMeals(
     metadata: (r.metadata ?? {}) as unknown as MealMetadata,
   }));
 }
+
+/** Drop every meal vector of a tenant (account deletion). A missing namespace is fine. */
+export async function deleteTenantVectors(tenantId: string): Promise<void> {
+  try {
+    await getIndex().deleteNamespace(tenantId);
+  } catch (err) {
+    if (!/not.?found|does not exist/i.test(String(err))) throw err;
+  }
+}

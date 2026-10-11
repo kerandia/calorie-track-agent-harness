@@ -2,7 +2,6 @@ import { redirect } from "next/navigation";
 import { getSessionTenantId } from "@/lib/auth";
 import {
   computeKcalGoal,
-  getActiveAssumptions,
   getDayTotals,
   getMealsInRange,
   getProfile,
@@ -41,10 +40,7 @@ export default async function Dashboard({
       ? sp.d
       : `${year}-${pad(month + 1)}-${pad(Math.min(now.getUTCDate(), new Date(Date.UTC(year, month + 1, 0)).getUTCDate()))}`;
 
-  const [profile, assumptions] = await Promise.all([
-    getProfile(tenantId),
-    getActiveAssumptions(tenantId),
-  ]);
+  const profile = await getProfile(tenantId);
   const goal = computeKcalGoal(profile);
 
   const dates = monthDates(year, month);
@@ -148,52 +144,6 @@ export default async function Dashboard({
         goal={goal}
       />
 
-      <div className="panel" style={{ marginTop: 18 }}>
-        <div className="section-title" style={{ marginTop: 0 }}>
-          Profile
-        </div>
-        {profile.onboarded_at ? (
-          <p style={{ margin: "4px 0" }}>
-            {[
-              profile.name,
-              profile.age ? `${profile.age}yo` : null,
-              profile.sex,
-              profile.weight_kg ? `${profile.weight_kg}kg` : null,
-              goal ? `goal ${goal} kcal` : null,
-            ]
-              .filter(Boolean)
-              .join(" · ")}
-          </p>
-        ) : (
-          <p className="muted">
-            Profile not complete — tell Sezar your age, height and weight in the chat.
-          </p>
-        )}
-        {profile.allergies?.length ? (
-          <p className="muted" style={{ margin: "4px 0" }}>
-            Allergies: {profile.allergies.join(", ")}
-          </p>
-        ) : null}
-
-        {assumptions.length ? (
-          <>
-            <div className="section-title">What the agent thinks it knows</div>
-            <div className="grid-meals">
-              {assumptions.map((a) => (
-                <div key={a.id} className="meal-row">
-                  <span>
-                    {a.text}
-                    {a.status === "confirmed" ? " ✅" : ""}
-                  </span>
-                  <span className="pill" style={{ fontSize: 11 }}>
-                    {a.confidence}
-                  </span>
-                </div>
-              ))}
-            </div>
-          </>
-        ) : null}
-      </div>
     </>
   );
 }

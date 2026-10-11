@@ -224,3 +224,78 @@ export async function getArtifacts(tenantId: string, limit = 100): Promise<Artif
   });
   return out;
 }
+
+// ── You: linked chats, decisions on what Sezar learned, export ────────────
+
+/** The iMessage number linked from Telegram (/link), if any. */
+export async function getLinkedPhone(tenantId: string): Promise<string | null> {
+  const v = await redis().get<string | number>(k(tenantId, "phone"));
+  return v === null || v === undefined ? null : String(v);
+}
+
+/** Drop the link both ways (mirrors .flue/lib/identity.ts unlinkPhone). */
+export async function unlinkPhone(tenantId: string): Promise<void> {
+  const phone = await getLinkedPhone(tenantId);
+  if (!phone) return;
+  const aliasKey = `ident:phone:${phone}`;
+  const owner = await redis().get<string | number>(aliasKey);
+  const pipe = redis().pipeline();
+  pipe.del(k(tenantId, "phone"));
+  if (owner !== null && String(owner) === tenantId) pipe.del(aliasKey);
+  await pipe.exec();
+}
+
+/** The user's verdict on something Sezar inferred. Rejected ones stop riding in its context. */
+export async function setAssumptionStatus(
+  tenantId: string,
+  id: string,
+  status: "confirmed" | "rejected",
+): Promise<boolean> {
+  if (!/^[a-f0-9]{8}$/.test(id)) return false;
+  const key = k(tenantId, "assumption", id);
+  const existing = await redis().hgetall<Record<string, string>>(key);
+  if (!existing || Object.keys(existing).length === 0) return false;
+  await redis().hset(key, { status, updated_at: new Date().toISOString() });
+  return true;
+}
+
+const isTenantSessionKey = (key: string, tenantId: string): boolean => {
+  try {
+    const parts = JSON.parse(key.slice("flue:sess:agent-session:".length)) as unknown;
+    return Array.isArray(parts) && parts[0] === tenantId;
+  } catch {
+    return false;
+  }
+};
+
+/** Everything stored for a tenant, key by key (GDPR access / portability). */
+export async function exportTenantData(tenantId: string): Promise<Record<string, unknown>> {
+  const keys: string[] = [];
+  const sweep = async (match: string, keep: (key: string) => boolean = () => true) => {
+    let cursor = "0";
+    do {
+      const [next, batch] = await redis().scan(cursor, { match, count: 500 });
+      cursor = String(next);
+      for (const key of batch as string[]) if (keep(key)) keys.push(key);
+    } while (cursor !== "0");
+  };
+  await sweep(`t:${tenantId}:*`);
+  await sweep("flue:sess:agent-session:*", (key) => isTenantSessionKey(key, tenantId));
+  keys.sort();
+
+  const out: Record<string, unknown> = {};
+  for (const key of keys) {
+    const type = await redis().type(key);
+    out[key] =
+      type === "hash"
+        ? await redis().hgetall(key)
+        : type === "zset"
+          ? await redis().zrange(key, 0, -1, { withScores: true })
+          : type === "list"
+            ? await redis().lrange(key, 0, -1)
+            : type === "set"
+              ? await redis().smembers(key)
+              : await redis().get(key);
+  }
+  return out;
+}

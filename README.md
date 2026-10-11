@@ -17,7 +17,8 @@ Calorie tracking is the first vertical; the architecture is built to extend into
 - **A computer of its own.** For tasks no tool covers (compute a weekly average, parse a recipe URL), the agent spins up an ephemeral Linux sandbox (Upstash Box) and runs code. This is the first step toward a general personal agent; persistent browser sessions, credential vaulting, and long-lived workspaces are intentionally separate future capabilities.
 - **Pages it publishes for you.** Ask for a trip plan, a weekly meal plan or a shopping list and the agent writes a self-contained HTML page, hosts it on Upstash Blob under your tenant prefix, and sends you the link. "Add day 3" updates the same URL.
 - **Maps it publishes for you.** Places (an itinerary, restaurants near the hotel, "what's within 10 min walk of X") become a live interactive map via [MapToAgent](https://maptoagent.xyz): grouped pins, routes per day, walk/bike/drive reach areas. Same link on update.
-- **Web dashboard.** Calorie calendar heatmap (deficit/surplus per day), daily progress ring, macro bars, meal log by day, profile + assumptions. Login via a one-time magic link the bot DMs you.
+- **Web dashboard.** Four tabs: Health (calorie calendar, trend, meal log), Saved (place lists with search, notes and Google Maps links), Published (every page and map, open / copy link) and You (profile, what Sezar learned with confirm / reject, linked chats, download-my-data). Login is a one-time link Sezar sends (`/login`, or `dashboard_link` straight to a tab or list).
+- **Your data.** Download everything from the You tab; delete everything from chat with `/deletemydata` then `DELETE` (code-checked, not the model). Deletion runs in the agent because only it holds every credential: Redis, Vector, Blob pages and MapToAgent maps. Conversation records from before one-session-per-tenant aren't keyed by tenant and expire within 90 days.
 
 ## Architecture
 

@@ -26,7 +26,10 @@ export async function POST(req: NextRequest) {
   }
 
   await setSession(tenantId);
-  return NextResponse.redirect(new URL("/dashboard", req.nextUrl.origin), {
+  // Only ever a dashboard path on this site — never an open redirect.
+  const next = form?.get("next")?.toString() ?? "";
+  const dest = /^\/dashboard(\/[A-Za-z0-9_-]+){0,2}$/.test(next) ? next : "/dashboard";
+  return NextResponse.redirect(new URL(dest, req.nextUrl.origin), {
     status: 303,
   });
 }
@@ -37,5 +40,7 @@ export async function GET(req: NextRequest) {
   const token = req.nextUrl.searchParams.get("token") ?? "";
   const url = new URL("/login/confirm", req.nextUrl.origin);
   if (token) url.searchParams.set("token", token);
+  const next = req.nextUrl.searchParams.get("next");
+  if (next) url.searchParams.set("next", next);
   return NextResponse.redirect(url);
 }
