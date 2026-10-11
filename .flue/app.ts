@@ -2,13 +2,15 @@ import { flue, observe, registerProvider } from "@flue/runtime/app";
 import { Hono } from "hono";
 import { Redis } from "@upstash/redis";
 import {
+  answerCallbackQuery,
+  clearButtons,
   sendMessage,
   telegramChannel,
   telegramInboxItem,
   type TgUpdate,
 } from "./lib/telegramApi.js";
 import { imessageChannel, parseImessageWebhook } from "./lib/imessage.js";
-import { toBubbles, type Channel } from "./lib/channel.js";
+import { toBubbles, type Channel, type ChannelAction } from "./lib/channel.js";
 import { prepareForVision, type VisionImage } from "./lib/images.js";
 import { linkPhone, normalizePhone, tenantForPhone, unlinkPhone } from "./lib/identity.js";
 import { createLoginToken } from "./lib/loginToken.js";
@@ -334,6 +336,32 @@ app.post("/tg/webhook", async (c) => {
   const update = (await c.req.json().catch(() => null)) as TgUpdate | null;
   const msg = update?.message;
 
+  // Confirm / Cancel taps under a draft. A tap becomes the same /approve or
+  // /cancel command the user could type, queued like any message, so it is
+  // decided by code (tenant-scoped token) before the model runs.
+  const cb = update?.callback_query;
+  if (update && cb) {
+    const choice = /^(ap|cx):([a-f0-9-]{36})$/.exec(cb.data ?? "");
+    const chatId = cb.message?.chat.id;
+    await answerCallbackQuery(cb.id, choice ? (choice[1] === "ap" ? "on it…" : "cancelled") : undefined);
+    if (!choice || !chatId) return c.json({ ok: true });
+    if (cb.message) await clearButtons(chatId, cb.message.message_id);
+    const tenantId = assertTenantId(String(cb.from.id));
+    const outcome = await acceptInbound(
+      `tg:update:${update.update_id}`,
+      tenantId,
+      {
+        id: String(update.update_id),
+        received_at: Date.now(),
+        via: { channel: "telegram", chatId },
+        text: `/${choice[1] === "ap" ? "approve" : "cancel"} ${choice[2]}`,
+      },
+      () => enqueueDrain("/tg/process", { tenantId, chatId }),
+    );
+    if (outcome === "failed") return c.json({ error: "enqueue failed" }, 500);
+    return c.json({ ok: true });
+  }
+
   // Number linking is answered here, at the Telegram edge: it needs Telegram's
   // contact button and never needs the agent.
   if (update && msg?.chat?.id && msg.from?.id && (msg.contact || linkCommand(msg.text))) {
@@ -608,6 +636,15 @@ async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T) => Promis
   return out;
 }
 
+/** Confirm / Cancel buttons for a staged draft (Telegram; other channels reply "yes"). */
+const approvalActions = (a: { token: string; action: string }): ChannelAction[] => [
+  {
+    label: a.action === "delete_artifact" ? "Take it offline" : a.action.startsWith("update") ? "Update it" : "Publish",
+    data: `ap:${a.token}`,
+  },
+  { label: "Cancel", data: `cx:${a.token}` },
+];
+
 /** Download one photo and make it vision-ready; null on any failure. */
 async function loadPhoto(channel: Channel, media: MediaRef): Promise<VisionImage | null> {
   try {
@@ -750,7 +787,9 @@ async function handleBatch(
       await channel.sendText("the model just hiccuped on me — try again in a moment.");
       return; // don't retry LLM failures — user was told
     }
-    const data = (await res.json()) as { result?: { reply?: string } };
+    const data = (await res.json()) as {
+      result?: { reply?: string; approval?: { token: string; action: string } };
+    };
     const reply = data.result?.reply;
     const runId = res.headers.get("x-flue-run-id") ?? "?";
     if (!reply) {
@@ -761,9 +800,12 @@ async function handleBatch(
     console.log(formatOutboundReplyLog({ tenantId, text: reply, runId }));
 
     const bubbles = toBubbles(reply, channel.maxBubbles);
+    const approval = data.result?.approval;
+    const actions = approval ? approvalActions(approval) : undefined;
     for (let i = 0; i < bubbles.length; i++) {
-      await channel.sendText(bubbles[i]!);
-      if (i < bubbles.length - 1) await sleep(450);
+      const last = i === bubbles.length - 1;
+      await channel.sendText(bubbles[i]!, last && actions ? { actions } : undefined);
+      if (!last) await sleep(450);
     }
 
     // Spoken in, spoken out: voice notes get a voice reply on top of text.

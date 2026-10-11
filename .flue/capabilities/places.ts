@@ -40,12 +40,13 @@ export function createPlacesCapability(tenantId: string) {
     }),
     execute: async (args) => {
       try {
-        const { list, refreshed, truncated } = await importSharedList(tenantId, args.url);
+        const { list, refreshed, truncated, unreadable } = await importSharedList(tenantId, args.url);
         const noted = list.places.filter((p) => p.note);
         const sample = [...noted, ...list.places.filter((p) => !p.note)].slice(0, 25);
         return [
           `${refreshed ? "Refreshed" : "Imported"} "${list.name}" as Sezar list [${list.id}]: ${list.places.length} places, ${noted.length} with the owner's notes.` +
-            (truncated ? " Google reported more places than it returned; the list was cut short." : ""),
+            (truncated ? ` The list is longer than ${list.places.length} places; only the first ${list.places.length} were imported.` : " That's the whole list.") +
+            (unreadable ? ` ${unreadable} entr${unreadable === 1 ? "y" : "ies"} had no name or location and were skipped.` : ""),
           ...sample.map(placeLine),
           list.places.length > sample.length ? `…and ${list.places.length - sample.length} more (get_place_lists to see all).` : "",
           "The list name, the kinds of places and especially the notes are the owner's own taste. If it's the user's own list and a clear pattern shows, record it with note_assumption. Don't claim you changed anything in their Google Maps.",

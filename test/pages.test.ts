@@ -76,3 +76,9 @@ test("page updates require and normalise optimistic-concurrency etags", async ()
   assert.equal(captured?.options.ifUnchanged, '"old-etag"');
   assert.equal(published.etag, '"new-etag"');
 });
+
+test("pre-escaped titles are escaped exactly once", () => {
+  const html = buildPageHtml({ title: "Eat &amp; drink", subtitle: "Paris &amp; Berlin <3", bodyHtml: "<p>x</p>" });
+  assert.match(html, /<h1>Eat &amp; drink<\/h1>/);
+  assert.match(html, /<p class="sub">Paris &amp; Berlin &lt;3<\/p>/);
+});

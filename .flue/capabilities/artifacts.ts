@@ -4,7 +4,7 @@ import { deleteArtifactRecord, getArtifact, listArtifacts, recordArtifact, touch
 import { deleteMap, describeWarnings, getMap, maproomConfigured, publishMap, updateMap, type MapPlace, type MapSpec } from "../lib/maproom.js";
 import { deletePage, getPage, pagesConfigured, PrivateBucketError, putPage } from "../lib/pages.js";
 import { buildPageHtml } from "../lib/pageTemplate.js";
-import { consumeArtifactApproval, requestArtifactApproval, type ArtifactAction } from "../lib/artifactApproval.js";
+import { requestArtifactApproval, resolveApprovalReply, type ArtifactAction } from "../lib/artifactApproval.js";
 
 export function createArtifactCapability(tenantId: string, readSandboxFile: (path: string) => Promise<string>) {
   // ── Artifacts: hosted pages + interactive maps ───────────────────────────
@@ -287,6 +287,8 @@ export function createArtifactCapability(tenantId: string, readSandboxFile: (pat
 
   const writers = [publishPageTool, updatePageTool, publishMapTool, updateMapTool, deleteArtifactTool];
   const executors = new Map(writers.map(tool => [tool.name, tool.execute]));
+  /** The draft staged during this turn, so the reply can carry Publish / Cancel buttons. */
+  let staged: { token: string; action: ArtifactAction } | undefined;
   for (const tool of writers) {
     tool.description = `Prepare a draft for explicit user approval; DOES NOT publish or delete yet. ${tool.description}`;
     tool.execute = async (args) => {
@@ -303,17 +305,24 @@ export function createArtifactCapability(tenantId: string, readSandboxFile: (pat
         delete saved.body;
       }
       const token = await requestArtifactApproval(tenantId, { action: tool.name as ArtifactAction, args: saved });
+      staged = { token, action: tool.name as ArtifactAction };
       return `NOT EXECUTED. Draft ${tool.name}: ${String(args.title ?? args.artifact_id).slice(0, 160)}. ` +
         (tool.name === "delete_artifact" ? "Approval will take this item offline." : "Publishing makes this content accessible to anyone with its link. Do not publish secrets or sensitive health details.") +
-        ` Ask the user to send this exact command as a separate message within 10 minutes: /approve ${token}. Do not claim completion or execute this command yourself.`;
+        ` Say in one line what it is and ask them to confirm: on Telegram, buttons to confirm or cancel appear under your reply; anywhere they can simply reply "yes" (or "no" to scrap it) within 10 minutes. Do not claim it's done.`;
     };
   }
 
   return {
     tools: [...writers, listArtifactsTool, readArtifactTool],
+    /** The draft this turn staged, if any. */
+    pendingApproval: () => staged,
     async handleApproval(text: string): Promise<string | undefined> {
-      const pending = await consumeArtifactApproval(tenantId, text);
-      if (pending === undefined) return undefined;
+      const decision = await resolveApprovalReply(tenantId, text);
+      if (decision === undefined) return undefined;
+      if (decision.decision === "cancel") {
+        return decision.cancelled ? "ok, scrapped it — nothing was published." : "That draft had already expired or been handled.";
+      }
+      const pending = decision.pending;
       if (!pending) return "That approval expired or was already used. Ask me to prepare the draft again.";
       const execute = executors.get(pending.action);
       if (!execute) return "Unknown approval action; nothing was changed.";

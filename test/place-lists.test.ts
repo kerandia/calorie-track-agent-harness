@@ -19,7 +19,10 @@ const LIST_ID = "AbCdEfGhIjKlMnOpQrStUvWxYz01";
 const OWNER = ["Owner Person", "https://lh3.example/avatar", "123456789012345678901"];
 
 // Same positional shape as Google's getlist response (synthetic data).
-function getlistBody(places: { name: string; note?: string; cid: string; lat: number; lon: number }[]) {
+function getlistBody(
+  places: { name: string; note?: string; cid: string; lat: number; lon: number }[],
+  continuation = "",
+) {
   const items = places.map((p) => [
     null,
     [null, null, `${p.name}, 1 Example St, Lisbon, Portugal`, null, "Portugal, Lisbon, 1 Example St", [null, null, p.lat, p.lon], ["111", p.cid], "/g/x"],
@@ -29,7 +32,7 @@ function getlistBody(places: { name: string; note?: string; cid: string; lat: nu
     OWNER, null, null, [OWNER],
   ]);
   const list = [[LIST_ID, 1, [[1], [9]], 1, 1], 4, [2, 1, `https://www.google.com/maps/placelists/list/${LIST_ID}`], OWNER, "Lisbon eats", "", null, null, items, [], [1, 0], [1, 0], places.length];
-  return `)]}'\n${JSON.stringify([list, "x", null, null, null, null, "y"])}`;
+  return `)]}'\n${JSON.stringify([list, continuation, null, null, null, null, "y"])}`;
 }
 
 function memoryDb(): PlaceListStore {
@@ -81,6 +84,8 @@ test("a shared list parses to places and notes, never the owner's identity", () 
   );
   assert.equal(data.name, "Lisbon eats");
   assert.equal(data.declaredCount, 2);
+  assert.equal(data.hasMore, false);
+  assert.equal(data.unreadable, 0);
   assert.deepEqual(data.places[0], {
     name: "Taberna X",
     address: "1 Example St, Lisbon, Portugal",
@@ -98,6 +103,23 @@ test("negative (signed int64) CIDs become the unsigned ids Maps URLs use", () =>
   assert.equal(unsignedCid("-6132233778034352245"), "12314510295675199371");
   assert.equal(unsignedCid("4503869456705953711"), "4503869456705953711");
   assert.equal(unsignedCid("0x12"), undefined);
+});
+
+test("dropped pins are kept, and only Google's continuation token means truncation", () => {
+  const body = JSON.parse(getlistBody([{ name: "Café Y", cid: "17", lat: 1, lon: 2 }]).slice(5));
+  const items = body[0][8];
+  // A dropped pin: coordinates and a note, no name anywhere.
+  items.push([null, [null, null, "", null, "", [null, null, 48.85, 2.35]], "", "picnic spot", null]);
+  // Junk: no name, no coordinates.
+  items.push([null, [null, null, "", null, ""], "", "", null]);
+  body[0][12] = 3;
+  const data = parseSharedList(JSON.stringify(body));
+  assert.equal(data.places.length, 2);
+  assert.deepEqual(data.places[1], { name: "Dropped pin", lat: 48.85, lon: 2.35, note: "picnic spot" });
+  assert.equal(data.unreadable, 1);
+  assert.equal(data.hasMore, false); // fewer places than declared is not truncation
+
+  assert.equal(parseSharedList(getlistBody([{ name: "A", cid: "1", lat: 0, lon: 0 }], "CgsI_token")).hasMore, true);
 });
 
 test("a changed or private response fails loudly instead of importing nothing", () => {
