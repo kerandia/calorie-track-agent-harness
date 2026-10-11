@@ -794,7 +794,10 @@ export default async function chat({ init, payload }: FlueContext) {
         reply: v.string(),
       }),
     });
-    return data;
+    // A draft staged this turn rides along so the channel can attach
+    // confirm / cancel buttons to the reply (Telegram).
+    const approval = artifacts.pendingApproval();
+    return approval ? { ...data, approval } : data;
   } finally {
     if (boxRef.current) {
       try {

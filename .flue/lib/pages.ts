@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { Bucket, uniquePath } from "@upstash/blob";
 import sanitizeHtml from "sanitize-html";
+import { viewablePageUrl } from "./pageUrls.js";
 
 // Hosted HTML pages the agent writes for a user (a travel plan, a weekly meal
 // plan, a shopping list…), served from Upstash Blob.
@@ -104,7 +105,7 @@ export async function putPage(
     // expiresIn asks for) — useless for a link someone opens tomorrow.
     throw new PrivateBucketError();
   }
-  return { path: blob.path, url: blob.url, bytes, etag: normalizeEtag(blob.etag) };
+  return { path: blob.path, url: viewablePageUrl(blob.url), bytes, etag: normalizeEtag(blob.etag) };
 }
 
 export async function getPage(tenantId: string, path: string, storage?: PageStorage): Promise<{ html: string; etag: string }> {

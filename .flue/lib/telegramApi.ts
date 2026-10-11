@@ -17,7 +17,8 @@ export type ReplyMarkup =
       resize_keyboard?: boolean;
       one_time_keyboard?: boolean;
     }
-  | { remove_keyboard: true };
+  | { remove_keyboard: true }
+  | { inline_keyboard: { text: string; callback_data: string }[][] };
 
 export async function sendMessage(
   chatId: number,
@@ -39,6 +40,24 @@ export async function sendMessage(
   if (!res.ok) {
     console.error(`sendMessage failed ${res.status}: ${await res.text().catch(() => "")}`);
   }
+}
+
+/** Stop a tapped button's spinner, optionally with a short toast. */
+export async function answerCallbackQuery(id: string, text?: string): Promise<void> {
+  await fetch(api("answerCallbackQuery"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ callback_query_id: id, ...(text ? { text } : {}) }),
+  }).catch(() => {});
+}
+
+/** Remove the inline buttons from a message, so a decision can't be tapped twice. */
+export async function clearButtons(chatId: number, messageId: number): Promise<void> {
+  await fetch(api("editMessageReplyMarkup"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ chat_id: chatId, message_id: messageId, reply_markup: { inline_keyboard: [] } }),
+  }).catch(() => {});
 }
 
 export async function sendTyping(chatId: number): Promise<void> {
@@ -110,6 +129,13 @@ export type TgUpdate = {
     /** A shared contact card. `user_id` is set by Telegram, not the sender. */
     contact?: { phone_number: string; user_id?: number };
   };
+  /** A tap on an inline button under one of our messages. */
+  callback_query?: {
+    id: string;
+    from: { id: number };
+    data?: string;
+    message?: { message_id: number; chat: { id: number } };
+  };
 };
 
 /** Normalize one Telegram message for the inbox. Photos keep only the largest size. */
@@ -139,7 +165,14 @@ export function telegramChannel(chatId: number): Channel {
     maxBubbles: 3,
     // Telegram clears the typing action after ~5s.
     typingRefreshMs: 4000,
-    sendText: (text) => sendMessage(chatId, text),
+    sendText: (text, opts) =>
+      sendMessage(
+        chatId,
+        text,
+        opts?.actions?.length
+          ? { inline_keyboard: [opts.actions.map((a) => ({ text: a.label, callback_data: a.data }))] }
+          : undefined,
+      ),
     sendTyping: () => sendTyping(chatId),
     sendVoice: (audio) => sendVoice(chatId, audio),
     fetchMedia: async (media) => {

@@ -36,6 +36,15 @@ const ESCAPES: Record<string, string> = {
 
 export const escapeHtml = (s: string): string => s.replace(/[&<>"']/g, (c) => ESCAPES[c]!);
 
+const ENTITIES: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", "#39": "'", "#x27": "'", nbsp: " " };
+
+/**
+ * Title and subtitle are plain text, but the model writes them in the same
+ * breath as the HTML body and often pre-escapes them ("Berlin &amp; more").
+ * Decode the common entities first so escaping happens exactly once.
+ */
+const plainText = (s: string): string => escapeHtml(s.replace(/&(amp|lt|gt|quot|apos|#39|#x27|nbsp);/g, (_, e: string) => ENTITIES[e]!));
+
 export type PageInput = {
   title: string;
   /** One line under the title (dates, city, what this is). */
@@ -194,7 +203,7 @@ td:not(:first-child),th:not(:first-child){text-align:right}
 export function renderPage(input: PageInput): string {
   const updated = input.updatedAt ?? new Date();
   const stamp = updated.toISOString().slice(0, 10);
-  const title = escapeHtml(input.title);
+  const title = plainText(input.title);
   const brandInner =
     `<span class="brand-mark" aria-hidden="true">S</span><span>sezar</span>`;
   const brand = input.homeUrl
@@ -219,7 +228,7 @@ export function renderPage(input: PageInput): string {
 ${brand}
 <header class="head">
 <h1>${title}</h1>
-${input.subtitle ? `<p class="sub">${escapeHtml(input.subtitle)}</p>` : ""}
+${input.subtitle ? `<p class="sub">${plainText(input.subtitle)}</p>` : ""}
 ${cta}
 </header>
 <main>

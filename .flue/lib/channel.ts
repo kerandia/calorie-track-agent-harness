@@ -1,6 +1,9 @@
 import type { MediaRef } from "./inbox.js";
 import type { ChannelName } from "./message.js";
 
+/** A tappable choice under a message; `data` comes back to the webhook. */
+export type ChannelAction = { label: string; data: string };
+
 /**
  * How the turn pipeline talks back to one conversation. Each messaging channel
  * (Telegram, iMessage via Photon, …) implements this; the drain/turn code in
@@ -13,7 +16,8 @@ export interface Channel {
   readonly maxBubbles: number;
   /** How often to re-send the typing signal while a turn runs. */
   readonly typingRefreshMs: number;
-  sendText(text: string): Promise<void>;
+  /** `actions` render as buttons where the channel has them (Telegram); elsewhere they're dropped. */
+  sendText(text: string, opts?: { actions?: ChannelAction[] }): Promise<void>;
   sendTyping(): Promise<void>;
   /** For channels whose typing indicator stays on until cleared. */
   stopTyping?(): Promise<void>;

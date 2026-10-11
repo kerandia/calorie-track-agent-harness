@@ -1,4 +1,5 @@
 import { Redis } from "@upstash/redis";
+import { viewablePageUrl } from "./pageUrls.js";
 import type { PhotoKind } from "./vision.js";
 
 let _redis: Redis | null = null;
@@ -770,7 +771,7 @@ const parseArtifact = (id: string, r: Record<string, string> | null): ArtifactRe
     id,
     kind: (r.kind as ArtifactKind) ?? "page",
     title: r.title ?? "",
-    url: r.url ?? "",
+    url: viewablePageUrl(r.url ?? ""),
     external_id: r.external_id ?? "",
     version: r.version !== undefined && r.version !== "" ? Number(r.version) : undefined,
     created_at: r.created_at ?? "",

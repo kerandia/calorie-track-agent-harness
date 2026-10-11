@@ -134,8 +134,12 @@ export const unsignedCid = (raw: string | undefined): string | undefined => {
 export type SharedListData = {
   name: string;
   description?: string;
-  /** What Google says the list holds; more than places.length means truncation. */
+  /** What Google says the list holds. */
   declaredCount?: number;
+  /** Google sent a continuation token: the list is longer than one response. */
+  hasMore: boolean;
+  /** Entries with neither a name nor coordinates, which can't be kept. */
+  unreadable: number;
   places: Omit<SavedPlace, "id" | "added_at">[];
 };
 
@@ -156,11 +160,19 @@ export function parseSharedList(body: string): SharedListData {
   }
 
   const places: SharedListData["places"] = [];
+  let unreadable = 0;
   for (const item of items.slice(0, MAX_PLACES)) {
     // item[1]: place — [_, _, "Name, address", _, address, [_, _, lat, lon], [fid, cid], kgId]
     // item[2]: name; item[3]: the owner's note. item[12+] is the owner — never read.
-    const title = str(at(item, 2)) ?? str(at(item, 1, 2))?.split(",")[0];
-    if (!title) continue;
+    const lat = num(at(item, 1, 5, 2));
+    const lon = num(at(item, 1, 5, 3));
+    // A dropped pin has coordinates (and often a note) but no name.
+    const title =
+      str(at(item, 2)) ?? str(at(item, 1, 2))?.split(",")[0] ?? (lat !== undefined && lon !== undefined ? "Dropped pin" : undefined);
+    if (!title) {
+      unreadable++;
+      continue;
+    }
     const full = str(at(item, 1, 2));
     const address =
       full && full.startsWith(`${title}, `) ? full.slice(title.length + 2) : str(at(item, 1, 4));
@@ -169,8 +181,8 @@ export function parseSharedList(body: string): SharedListData {
     places.push({
       name: title,
       ...(address ? { address } : {}),
-      ...(num(at(item, 1, 5, 2)) !== undefined ? { lat: num(at(item, 1, 5, 2)) } : {}),
-      ...(num(at(item, 1, 5, 3)) !== undefined ? { lon: num(at(item, 1, 5, 3)) } : {}),
+      ...(lat !== undefined ? { lat } : {}),
+      ...(lon !== undefined ? { lon } : {}),
       ...(note ? { note: note.slice(0, MAX_NOTE) } : {}),
       ...(cid ? { cid } : {}),
     });
@@ -179,6 +191,9 @@ export function parseSharedList(body: string): SharedListData {
     name,
     ...(str(at(list, 5)) ? { description: str(at(list, 5)) } : {}),
     ...(num(at(list, 12)) !== undefined ? { declaredCount: num(at(list, 12)) } : {}),
+    // root[1] is Google's continuation token: empty when the whole list came back.
+    hasMore: Boolean(str(at(root, 1))) || items.length > MAX_PLACES,
+    unreadable,
     places,
   };
 }
@@ -292,7 +307,7 @@ export async function importSharedList(
   tenantId: string,
   link: string,
   deps: { fetchImpl?: Fetch; db?: PlaceListStore } = {},
-): Promise<{ list: PlaceList; refreshed: boolean; truncated: boolean }> {
+): Promise<{ list: PlaceList; refreshed: boolean; truncated: boolean; unreadable: number }> {
   const db = deps.db ?? getRedis();
   const googleId = await resolveSharedListId(link, deps.fetchImpl);
   const data = await fetchSharedList(googleId, deps.fetchImpl);
@@ -328,9 +343,5 @@ export async function importSharedList(
     },
     db,
   );
-  return {
-    list,
-    refreshed: Boolean(existing),
-    truncated: (data.declaredCount ?? 0) > data.places.length,
-  };
+  return { list, refreshed: Boolean(existing), truncated: data.hasMore, unreadable: data.unreadable };
 }

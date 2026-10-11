@@ -44,7 +44,7 @@ if [ "$1" = "set-webhook" ]; then
   echo "Registering Telegram webhook -> ${SERVICE_URL}/tg/webhook"
   curl -sS "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setWebhook" \
     -H 'Content-Type: application/json' \
-    -d "{\"url\":\"${SERVICE_URL}/tg/webhook\",\"secret_token\":\"${TELEGRAM_WEBHOOK_SECRET}\",\"drop_pending_updates\":false,\"allowed_updates\":[\"message\"]}"
+    -d "{\"url\":\"${SERVICE_URL}/tg/webhook\",\"secret_token\":\"${TELEGRAM_WEBHOOK_SECRET}\",\"drop_pending_updates\":false,\"allowed_updates\":[\"message\",\"callback_query\"]}"
   echo ""
   exit 0
 fi
