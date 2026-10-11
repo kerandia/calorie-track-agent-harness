@@ -14,15 +14,11 @@
 //     reviews go into chat replies, never into publish_map notes.
 //   - Reviews are shown as Google reviews, with their authors.
 
+import { googleMapsConfigured, googleMapsKey as key } from "./googleMaps.js";
+
 const BASE = "https://places.googleapis.com/v1";
 
-export const placesConfigured = (): boolean => Boolean(process.env.GOOGLE_MAPS_API_KEY);
-
-const key = (): string => {
-  const k = process.env.GOOGLE_MAPS_API_KEY;
-  if (!k) throw new Error("GOOGLE_MAPS_API_KEY not set");
-  return k;
-};
+export const placesConfigured = googleMapsConfigured;
 
 type Fetch = typeof fetch;
 

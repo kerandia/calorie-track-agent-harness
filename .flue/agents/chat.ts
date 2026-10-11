@@ -4,6 +4,7 @@ import * as v from "valibot";
 import { createArtifactCapability } from "../capabilities/artifacts.js";
 import { createPlacesCapability } from "../capabilities/places.js";
 import { createSearchCapability } from "../capabilities/search.js";
+import { createPlanningCapability } from "../capabilities/planning.js";
 import {
   deleteMealById,
   getActiveAssumptions,
@@ -559,6 +560,7 @@ export default async function chat({ init, payload }: FlueContext) {
   });
   const places = createPlacesCapability(input.tenantId);
   const search = createSearchCapability();
+  const planning = createPlanningCapability();
   const approvalReply = await artifacts.handleApproval(input.text);
   if (approvalReply !== undefined) return { reply: approvalReply };
 
@@ -592,6 +594,7 @@ export default async function chat({ init, payload }: FlueContext) {
       ...artifacts.tools,
       ...places.tools,
       ...search.tools,
+      ...planning.tools,
     ],
   });
   const session = await harness.session(input.tenantId);

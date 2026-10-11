@@ -77,6 +77,7 @@ Google has no API that reads or writes a user's Maps lists, so `capabilities/pla
 - **Details:** `place_details` resolves a place with the free IDs-only Text Search, then one Place Details call (rating, price, hours, up to 5 Google reviews), and confirms list matches by CID. Only the place id is stored (Google's caching rules), and reviews stay out of maps (EEA terms since Jul 2025).
 - **Taste:** list names and notes feed the assumptions ledger through the persona (`note_assumption`), never Places content.
 - **Discovery:** `web_search` (`capabilities/search.ts`, Exa) replaces recommending venues from model memory. When Exa answers with one of its Places pages, a second call fetches that page and `lib/exa.ts` parses each venue (address and coordinates, rating, hours, recent reviews without reviewer names). About $0.008 a search. Queries leave for Exa, so the persona keeps personal and health details out of them.
+- **Getting there, and what it's like outside:** `capabilities/planning.ts` adds `travel_times` (Routes API route matrix: walk, transit, drive or bike from one place to up to 25) and `outdoor_conditions` (Weather API hourly and daily, plus Air Quality now and over the coming hours, with exercise advice). Air quality is Google's Universal AQI, where higher is better, and every line handed to the model says so. All three APIs sit inside their free monthly caps at this scale.
 
 ### Photos: classify, remember, then act
 
@@ -115,6 +116,7 @@ Sezar's voice and standing rules live in `.flue/roles/sezar.md`, a Flue *role* c
 | Semantic recall | Upstash Vector | "Have I logged eggs this week?" — embeddings per tenant namespace |
 | Agent compute | Upstash Box | Ephemeral per-turn Linux sandbox for `run_shell` / `run_code` tools |
 | Page hosting | Upstash Blob (**public** bucket) | Pages the agent writes (plans, lists) rendered into the Sezar shell, tenant-prefixed paths, unlisted URLs, updated in place under an etag |
+| Places, routes, weather | Google Maps Platform (Places API (New), Routes, Weather, Air Quality) | Place details and reviews, real travel times, hourly forecasts and air quality, all on one key |
 | Search | [Exa](https://exa.ai) | Live place discovery (Exa Places: address, coordinates, hours, reviews) and web search in one API |
 | Maps | [MapToAgent](https://maptoagent.xyz) | Typed places in, hosted interactive map URL out; groups, routes, isochrone reach areas; stable URL across updates |
 | Channel | Telegram (webhook; [grammY](https://grammy.dev) for local dev) | Free, has photos/voice, and the verified Telegram sender id doubles as the tenant key and dashboard identity; future channels need provider-specific sender verification |
