@@ -18,16 +18,21 @@
   "dependencies": {
     "@flue/cli": "^0.6.1",
     "@flue/runtime": "^0.6.1",
+    "@spectrum-ts/core": "^12.10.1",
+    "@spectrum-ts/imessage": "^12.10.1",
     "@upstash/blob": "^0.0.5",
     "@upstash/box": "^0.4.1",
     "@upstash/redis": "^1.38.0",
     "@upstash/vector": "^1.2.3",
     "grammy": "^1.30.0",
+    "heic-decode": "^2.1.0",
     "hono": "^4.12.31",
+    "jpeg-js": "^0.4.4",
     "sanitize-html": "^2.17.7",
     "valibot": "^1.4.0"
   },
   "devDependencies": {
+    "@types/heic-decode": "^2.0.0",
     "@types/node": "^22.10.0",
     "@types/sanitize-html": "^2.16.1",
     "concurrently": "^9.2.1",

@@ -58,6 +58,27 @@ The webhook doesn't hand QStash the update itself. It appends the update to an o
 
 Why not one QStash job per update with a 429 while busy (the first design): QStash's retry backoff is `e^(2.5·n)` seconds — 12s, 2.5 min, 30 min, 6 h — so a five-photo album came back minutes to hours late, out of order, and sometimes never (retries exhausted). Each photo was also an isolated turn, so the model answered five times and never saw the pictures together.
 
+### iMessage via Photon: same pipeline, second channel
+
+iMessage arrives through [Photon Spectrum](https://photon.codes) managed lines: `/im/webhook` → the same per-user inbox → QStash → `/im/process`. Everything past the webhook is channel-neutral: the drain loop and the agent turn talk back through a `Channel` (`lib/channel.ts`: send text, typing, voice, fetch media), so the transport can later be swapped, e.g. for a self-hosted Mac, without touching the pipeline. iMessage tenants are `im:<handle>` (E.164 number or lowercased email) until linked: Telegram never gives a bot the user's phone number, so `/link` in Telegram asks for it with Telegram's share-contact button, and it counts only when the contact's `user_id` is the sender's own. From then on iMessage from that number lands in the Telegram tenant (`lib/identity.ts`) — one inbox, one session, each turn answered on the channel it came from. `/unlink` undoes it.
+
+Three Photon-specific choices:
+- **We verify and enqueue the webhook ourselves** (`verifySpectrumSignature`) instead of using the SDK's `app.webhook()`, whose handler runs *after* the response, when Cloud Run no longer grants CPU.
+- **Replies go through the SDK** (gRPC, created lazily in `/im/process`); Spectrum has no HTTP send API. We never read `app.messages`, so webhooks stay the only inbound path.
+- **One bubble per reply, no voice replies.** Rapid multi-bubble bursts are the pattern Apple flags as automated, and our TTS is OGG/Opus. Photos arrive as HEIC and are converted to ≤1600px JPEG (`lib/images.ts`); voice memos (AAC/m4a) go to the same STT.
+
+On the free plan, lines are shared and only reach handles added under **Users** in the Photon dashboard (max 10).
+
+### Places: Google Maps lists, Sezar lists, place details
+
+Google has no API that reads or writes a user's Maps lists, so `capabilities/places.ts` works around both directions:
+- **Read:** a list shared by link is public. `import_google_maps_list` resolves the link and reads Google's own (undocumented) `entitylist/getlist` JSON, with no browser, no login and no consent interstitial, then keeps each place's name, address, coordinates, CID and the owner's note. The owner's name, avatar and account id in that response are never read. The endpoint is undocumented, so the parser fails loudly on a shape change instead of importing garbage.
+- **Write:** Sezar keeps its own lists (`lib/placeLists.ts`, one JSON value per list plus an index for the per-turn context). Getting a place into Google Maps is a link (`?cid=` or `query_place_id`); the user taps Save. Re-importing a link refreshes the same Sezar list.
+- **Details:** `place_details` resolves a place with the free IDs-only Text Search, then one Place Details call (rating, price, hours, up to 5 Google reviews), and confirms list matches by CID. Only the place id is stored (Google's caching rules), and reviews stay out of maps (EEA terms since Jul 2025).
+- **Taste:** list names and notes feed the assumptions ledger through the persona (`note_assumption`), never Places content.
+- **Discovery:** `web_search` (`capabilities/search.ts`, Exa) replaces recommending venues from model memory. When Exa answers with one of its Places pages, a second call fetches that page and `lib/exa.ts` parses each venue (address and coordinates, rating, hours, recent reviews without reviewer names). About $0.008 a search. Queries leave for Exa, so the persona keeps personal and health details out of them.
+- **Getting there, and what it's like outside:** `capabilities/planning.ts` adds `travel_times` (Routes API route matrix: walk, transit, drive or bike from one place to up to 25) and `outdoor_conditions` (Weather API hourly and daily, plus Air Quality now and over the coming hours, with exercise advice). Air quality is Google's Universal AQI, where higher is better, and every line handed to the model says so. All three APIs sit inside their free monthly caps at this scale.
+
 ### Photos: classify, remember, then act
 
 Each photo goes through a vision call that returns a **kind** (`plated_meal`, `packaged_food`, `ingredients_storage`, `menu_or_recipe`, `not_food`) plus a kind-appropriate description — an itemized inventory for a fridge or shelf, portions for a plate, the numbers for a label. Descriptions are stored in a per-user **photo memory** (`t:{id}:photos`, 7 days) and the last 48 hours are injected into every turn's context. That is what makes "what should I cook from what I sent you?" answerable without relying on the model to dig the right turn out of a long transcript.
@@ -95,6 +116,8 @@ Sezar's voice and standing rules live in `.flue/roles/sezar.md`, a Flue *role* c
 | Semantic recall | Upstash Vector | "Have I logged eggs this week?" — embeddings per tenant namespace |
 | Agent compute | Upstash Box | Ephemeral per-turn Linux sandbox for `run_shell` / `run_code` tools |
 | Page hosting | Upstash Blob (**public** bucket) | Pages the agent writes (plans, lists) rendered into the Sezar shell, tenant-prefixed paths, unlisted URLs, updated in place under an etag |
+| Places, routes, weather | Google Maps Platform (Places API (New), Routes, Weather, Air Quality) | Place details and reviews, real travel times, hourly forecasts and air quality, all on one key |
+| Search | [Exa](https://exa.ai) | Live place discovery (Exa Places: address, coordinates, hours, reviews) and web search in one API |
 | Maps | [MapToAgent](https://maptoagent.xyz) | Typed places in, hosted interactive map URL out; groups, routes, isochrone reach areas; stable URL across updates |
 | Channel | Telegram (webhook; [grammY](https://grammy.dev) for local dev) | Free, has photos/voice, and the verified Telegram sender id doubles as the tenant key and dashboard identity; future channels need provider-specific sender verification |
 | Queue | Upstash QStash | Reliable "go drain this user's inbox" delivery + retries between webhook ack and agent turn |
@@ -158,6 +181,7 @@ For the dashboard: `cd dashboard && cp .env.example .env.local && npm install &&
 gcloud auth login && gcloud config set project <project>
 ./deploy-cloudrun.sh              # build + deploy
 ./deploy-cloudrun.sh set-webhook  # first time / after secret change
+./deploy-cloudrun.sh imessage-webhook && ./deploy-cloudrun.sh  # iMessage, once: registers /im/webhook with Photon, saves its secret, redeploys
 ```
 
 **Dashboard → Vercel:** import the repo, set **Root Directory = `dashboard`**, add the env vars, deploy. Then register the domain with @BotFather (`/setdomain`) if you want the Telegram Login Widget in addition to magic links.

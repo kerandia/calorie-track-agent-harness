@@ -6,7 +6,25 @@ import { transcribe as fishTranscribe } from "./fishAudio.js";
 //      Turkish-proven alternative — flip via env, no deploy needed beyond it)
 //   2. Fish Audio ASR as fallback (needs Fish API credit)
 // Telegram voice notes are OGG/Opus — "ogg" is an accepted format value on
-// OpenRouter's endpoint (verified in their multimodal STT docs).
+// OpenRouter's endpoint (verified in their multimodal STT docs). iMessage
+// voice memos arrive as AAC in an MP4 container (audio/mp4, audio/x-m4a).
+
+const AUDIO_FORMATS: Record<string, string> = {
+  "audio/ogg": "ogg",
+  "audio/opus": "ogg",
+  "audio/mp4": "m4a",
+  "audio/m4a": "m4a",
+  "audio/x-m4a": "m4a",
+  "audio/aac": "aac",
+  "audio/mpeg": "mp3",
+  "audio/wav": "wav",
+  "audio/x-wav": "wav",
+  "audio/x-caf": "caf",
+};
+
+/** The `format` value transcribeVoice expects for a voice note's MIME type. */
+export const audioFormatFor = (mimeType: string | undefined): string =>
+  AUDIO_FORMATS[(mimeType ?? "").toLowerCase().split(";")[0]!.trim()] ?? "ogg";
 
 export async function transcribeVoice(
   audio: Uint8Array,

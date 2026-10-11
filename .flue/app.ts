@@ -2,16 +2,18 @@ import { flue, observe, registerProvider } from "@flue/runtime/app";
 import { Hono } from "hono";
 import { Redis } from "@upstash/redis";
 import {
-  downloadFile,
-  downloadPhotoBase64,
   sendMessage,
-  sendTyping,
-  sendVoice,
+  telegramChannel,
+  telegramInboxItem,
   type TgUpdate,
 } from "./lib/telegramApi.js";
+import { imessageChannel, parseImessageWebhook } from "./lib/imessage.js";
+import { toBubbles, type Channel } from "./lib/channel.js";
+import { prepareForVision, type VisionImage } from "./lib/images.js";
+import { linkPhone, normalizePhone, tenantForPhone, unlinkPhone } from "./lib/identity.js";
 import { createLoginToken } from "./lib/loginToken.js";
 import { cleanForSpeech, synthesize } from "./lib/fishAudio.js";
-import { transcribeVoice } from "./lib/stt.js";
+import { audioFormatFor, transcribeVoice } from "./lib/stt.js";
 import { MAIN_MODEL_CONTEXT_WINDOW, MAIN_MODEL_ID } from "./lib/models.js";
 import { assertTenantId, toAgentMessage } from "./lib/message.js";
 import {
@@ -22,12 +24,15 @@ import {
 import {
   acquireTurnLock,
   inboxLength,
+  leadingRun,
   peekInbox,
   pushInbox,
   releaseTurnLock,
   removeInboxItem,
   trimInbox,
   type InboxItem,
+  type MediaRef,
+  type ReplyRoute,
 } from "./lib/inbox.js";
 
 // Structured run telemetry → Cloud Run Logs Explorer (queryable JSON lines).
@@ -206,6 +211,10 @@ registerProvider("nebius", {
 // five "that's a freezer, not a plate" replies, and a model that never saw the
 // photos side by side. The inbox keeps per-tenant order, never 429s, and lets
 // one turn see the whole burst.
+//
+// iMessage (Photon Spectrum) runs the same pipeline: /im/webhook → inbox →
+// QStash → /im/process. Everything past the webhook is channel-neutral and
+// talks back through a `Channel` (lib/channel.ts).
 
 let _redis: Redis | null = null;
 const redis = (): Redis => {
@@ -264,10 +273,16 @@ app.use("/agents/*", async (c, next) => {
   await next();
 });
 
-/** Ask QStash to run /tg/process for this tenant. Cheap if a drain is already running. */
-async function publishProcess(tenantId: string, chatId: number): Promise<boolean> {
+/**
+ * Ask QStash to run a channel's /process route for one tenant. Cheap if a
+ * drain is already running.
+ */
+async function enqueueDrain(
+  path: "/tg/process" | "/im/process",
+  body: { tenantId: string } & Record<string, unknown>,
+): Promise<boolean> {
   const res = await fetch(
-    `https://qstash.upstash.io/v2/publish/${env("SERVICE_URL")}/tg/process`,
+    `https://qstash.upstash.io/v2/publish/${env("SERVICE_URL")}${path}`,
     {
       method: "POST",
       headers: {
@@ -276,15 +291,36 @@ async function publishProcess(tenantId: string, chatId: number): Promise<boolean
         "Upstash-Forward-x-process-secret": env("INTERNAL_API_SECRET"),
         "Upstash-Retries": "3",
       },
-      body: JSON.stringify({ tenantId, chatId }),
+      body: JSON.stringify(body),
     },
   );
   if (!res.ok) {
     console.error(
-      `[tg] QStash publish failed ${res.status}: ${await res.text().catch(() => "")}`,
+      `[queue] QStash publish to ${path} failed ${res.status}: ${await res.text().catch(() => "")}`,
     );
   }
   return res.ok;
+}
+
+/**
+ * Append a webhook's normalized item to the tenant inbox and schedule a drain.
+ * False means nothing was kept, so the channel's redelivery starts clean.
+ */
+async function acceptInbound(
+  dedupeKey: string,
+  tenantId: string,
+  item: InboxItem,
+  drain: () => Promise<boolean>,
+): Promise<"queued" | "duplicate" | "failed"> {
+  const fresh = await redis().set(dedupeKey, "1", { nx: true, ex: 3600 });
+  if (fresh !== "OK") return "duplicate";
+  await pushInbox(tenantId, item);
+  if (!(await drain())) {
+    await removeInboxItem(tenantId, item).catch(() => {});
+    await redis().del(dedupeKey).catch(() => {});
+    return "failed";
+  }
+  return "queued";
 }
 
 app.post("/tg/webhook", async (c) => {
@@ -297,6 +333,15 @@ app.post("/tg/webhook", async (c) => {
 
   const update = (await c.req.json().catch(() => null)) as TgUpdate | null;
   const msg = update?.message;
+
+  // Number linking is answered here, at the Telegram edge: it needs Telegram's
+  // contact button and never needs the agent.
+  if (update && msg?.chat?.id && msg.from?.id && (msg.contact || linkCommand(msg.text))) {
+    const fresh = await redis().set(`tg:update:${update.update_id}`, "1", { nx: true, ex: 3600 });
+    if (fresh === "OK") await handleTelegramLinking(msg);
+    return c.json({ ok: true });
+  }
+
   // Handle plain user messages with text, a photo, or a voice note.
   if (
     !update ||
@@ -307,41 +352,18 @@ app.post("/tg/webhook", async (c) => {
     return c.json({ ok: true });
   }
 
-  // Dedupe: Telegram redelivers updates if it thinks the webhook failed.
-  const dedupeKey = `tg:update:${update.update_id}`;
-  const fresh = await redis().set(dedupeKey, "1", { nx: true, ex: 3600 });
-  if (fresh !== "OK") return c.json({ ok: true });
-
   const tenantId = assertTenantId(String(msg.from.id));
-  const item: InboxItem = {
-    update_id: update.update_id,
-    received_at: Date.now(),
-    message: msg,
-  };
-  await pushInbox(tenantId, item);
-
-  if (!(await publishProcess(tenantId, msg.chat.id))) {
-    // Undo both so Telegram's redelivery gets a clean second attempt.
-    await removeInboxItem(tenantId, item).catch(() => {});
-    await redis().del(dedupeKey).catch(() => {});
-    return c.json({ error: "enqueue failed" }, 500);
-  }
+  const chatId = msg.chat.id;
+  // Dedupe: Telegram redelivers updates if it thinks the webhook failed.
+  const outcome = await acceptInbound(
+    `tg:update:${update.update_id}`,
+    tenantId,
+    telegramInboxItem(update.update_id, msg, Date.now()),
+    () => enqueueDrain("/tg/process", { tenantId, chatId }),
+  );
+  if (outcome === "failed") return c.json({ error: "enqueue failed" }, 500);
   return c.json({ ok: true });
 });
-
-/** Peek the inbox, waiting briefly while a burst is still arriving. */
-async function collectBatch(tenantId: string): Promise<InboxItem[]> {
-  const started = Date.now();
-  for (;;) {
-    const items = await peekInbox(tenantId);
-    if (items.length === 0) return items;
-    const last = items[items.length - 1]!;
-    const settle = last.message.media_group_id ? ALBUM_SETTLE_MS : SETTLE_MS;
-    const wait = last.received_at + settle - Date.now();
-    if (wait <= 0 || Date.now() - started > MAX_SETTLE_WAIT_MS) return items;
-    await sleep(Math.min(wait, 1500));
-  }
-}
 
 app.post("/tg/process", async (c) => {
   if (c.req.header("x-process-secret") !== env("INTERNAL_API_SECRET")) {
@@ -353,55 +375,217 @@ app.post("/tg/process", async (c) => {
   } | null;
   if (!body?.tenantId || !body.chatId) return c.json({ ok: true });
   const { tenantId, chatId } = body;
+  return c.json(
+    await drainTenant(tenantId, { channel: "telegram", chatId }, () =>
+      enqueueDrain("/tg/process", { tenantId, chatId }),
+    ),
+  );
+});
+
+// Photon Spectrum → POST /im/webhook. Signed with the per-webhook secret that
+// `./deploy-cloudrun.sh imessage-webhook` stored as SPECTRUM_WEBHOOK_SECRET.
+// 401/400 are fatal to Spectrum (no retry); 5xx is retried for ~30s.
+app.post("/im/webhook", async (c) => {
+  const secret = process.env.SPECTRUM_WEBHOOK_SECRET;
+  if (!secret) return c.json({ error: "imessage not configured" }, 503);
+
+  const rawBody = new Uint8Array(await c.req.arrayBuffer());
+  const headers: Record<string, string> = {};
+  c.req.raw.headers.forEach((value, key) => {
+    headers[key.toLowerCase()] = value;
+  });
+  const parsed = await parseImessageWebhook({ rawBody, headers, secret });
+  if (!parsed.ok) {
+    console.warn(`[imessage] webhook rejected: ${parsed.reason}`);
+    return c.json({ error: parsed.reason }, parsed.status);
+  }
+  const delivery = parsed.delivery;
+  if (!delivery?.item) return c.json({ ok: true });
+
+  // A number linked from Telegram (/link) lands in that existing account.
+  const e164 = normalizePhone(delivery.handle);
+  const tenantId = (e164 && (await tenantForPhone(e164))) || delivery.tenantId;
+  const { spaceId, phone } = delivery;
+  // Dedupe: Spectrum delivers at-least-once; the message id is stable across retries.
+  const outcome = await acceptInbound(
+    `im:msg:${delivery.item.id}`,
+    tenantId,
+    delivery.item,
+    () => enqueueDrain("/im/process", { tenantId, spaceId, phone }),
+  );
+  if (outcome === "failed") return c.json({ error: "enqueue failed" }, 500);
+  return c.json({ ok: true });
+});
+
+app.post("/im/process", async (c) => {
+  if (c.req.header("x-process-secret") !== env("INTERNAL_API_SECRET")) {
+    return c.json({ error: "forbidden" }, 403);
+  }
+  const body = (await c.req.json().catch(() => null)) as {
+    tenantId?: string;
+    spaceId?: string;
+    phone?: string;
+  } | null;
+  if (!body?.tenantId || !body.spaceId || !body.phone) return c.json({ ok: true });
+  const job = {
+    tenantId: assertTenantId(body.tenantId),
+    spaceId: body.spaceId,
+    phone: body.phone,
+  };
+  return c.json(
+    await drainTenant(
+      job.tenantId,
+      { channel: "imessage", spaceId: job.spaceId, phone: job.phone },
+      () => enqueueDrain("/im/process", job),
+    ),
+  );
+});
+
+const channelFor = (route: ReplyRoute): Channel =>
+  route.channel === "telegram"
+    ? telegramChannel(route.chatId)
+    : imessageChannel(route.spaceId, route.phone);
+
+/**
+ * Peek the inbox for the next turn: the leading run of messages from one
+ * conversation, waiting briefly while a burst is still arriving. `fallback`
+ * routes items queued before items carried their own route.
+ */
+async function collectBatch(
+  tenantId: string,
+  fallback: ReplyRoute,
+): Promise<{ route: ReplyRoute; items: InboxItem[] }> {
+  const started = Date.now();
+  for (;;) {
+    const run = leadingRun(await peekInbox(tenantId), fallback);
+    if (run.items.length === 0 || run.closed) return run;
+    const last = run.items[run.items.length - 1]!;
+    const settle = last.album ? ALBUM_SETTLE_MS : SETTLE_MS;
+    const wait = last.received_at + settle - Date.now();
+    if (wait <= 0 || Date.now() - started > MAX_SETTLE_WAIT_MS) return run;
+    await sleep(Math.min(wait, 1500));
+  }
+}
+
+/**
+ * Drain one tenant's inbox in order, one agent turn per burst, each answered
+ * on the channel it came from (a linked user's Telegram and iMessage share
+ * the inbox). `requeue` schedules a fresh drain when this one runs out of time.
+ */
+async function drainTenant(
+  tenantId: string,
+  fallback: ReplyRoute,
+  requeue: () => Promise<boolean>,
+): Promise<{ ok: true; deferred?: true; continued?: true }> {
   const started = Date.now();
 
   for (;;) {
     if (!(await acquireTurnLock(tenantId, LOCK_TTL_S))) {
       // Another request is draining this tenant. It re-checks the inbox after
       // releasing the lock, so nothing we appended can be stranded.
-      return c.json({ ok: true, deferred: true });
+      return { ok: true, deferred: true };
     }
 
     let continueLater = false;
-    const typing = setInterval(() => void sendTyping(chatId), 4000);
     try {
       for (;;) {
         if (Date.now() - started > DRAIN_DEADLINE_MS) {
           continueLater = true;
           break;
         }
-        const batch = await collectBatch(tenantId);
-        if (batch.length === 0) break;
-        void sendTyping(chatId);
-        await handleBatch(chatId, tenantId, batch);
-        await trimInbox(tenantId, batch.length);
+        const batch = await collectBatch(tenantId, fallback);
+        if (batch.items.length === 0) break;
+        const channel = channelFor(batch.route);
+        const typing = () => void channel.sendTyping().catch(() => {});
+        const typingTimer = setInterval(typing, channel.typingRefreshMs);
+        typing();
+        try {
+          await handleBatch(channel, tenantId, batch.items);
+        } finally {
+          clearInterval(typingTimer);
+          await channel.stopTyping?.().catch(() => {});
+        }
+        await trimInbox(tenantId, batch.items.length);
       }
     } finally {
-      clearInterval(typing);
       await releaseTurnLock(tenantId).catch(() => {});
     }
 
     if (continueLater) {
       // Hand the rest to a fresh request rather than tripping Cloud Run's timeout.
-      await publishProcess(tenantId, chatId);
-      return c.json({ ok: true, continued: true });
+      await requeue();
+      return { ok: true, continued: true };
     }
-    if ((await inboxLength(tenantId)) === 0) return c.json({ ok: true });
+    if ((await inboxLength(tenantId)) === 0) return { ok: true };
     // Something landed between our last empty peek and the lock release: go again.
   }
-});
+}
 
-async function sendLoginLink(chatId: number, tenantId: string): Promise<void> {
+type LinkCommand = "link" | "unlink";
+const linkCommand = (text: string | undefined): LinkCommand | null => {
+  const cmd = (text ?? "").trim().toLowerCase();
+  if (cmd === "/link" || cmd === "/imessage") return "link";
+  if (cmd === "/unlink") return "unlink";
+  return null;
+};
+
+/**
+ * /link → Telegram's share-my-number button. A shared contact links the number
+ * only when Telegram says it is the sender's own (contact.user_id === from.id);
+ * from then on iMessage from that number reaches this same tenant.
+ */
+async function handleTelegramLinking(msg: NonNullable<TgUpdate["message"]>): Promise<void> {
+  const chatId = msg.chat!.id;
+  const tenantId = assertTenantId(String(msg.from!.id));
+  try {
+    if (msg.contact) {
+      const e164 = normalizePhone(msg.contact.phone_number);
+      if (msg.contact.user_id !== msg.from!.id || !e164) {
+        await sendMessage(chatId, "That's not your own number. Send /link and tap the button to share yours.");
+        return;
+      }
+      await linkPhone(e164, tenantId);
+      console.log(JSON.stringify({ evt: "phone_linked", channel: "telegram" }));
+      await sendMessage(
+        chatId,
+        `Linked ${e164}. Texting me on iMessage from that number now reaches this same Sezar — same meals, profile and memory. Send /unlink to undo.`,
+        { remove_keyboard: true },
+      );
+      return;
+    }
+    if (linkCommand(msg.text) === "unlink") {
+      const e164 = await unlinkPhone(tenantId);
+      await sendMessage(
+        chatId,
+        e164 ? `Unlinked ${e164}. iMessage from it is a separate chat again.` : "No number is linked.",
+      );
+      return;
+    }
+    await sendMessage(
+      chatId,
+      "Tap the button to share your phone number. Then iMessage from that number reaches this same Sezar.",
+      {
+        keyboard: [[{ text: "Share my phone number", request_contact: true }]],
+        resize_keyboard: true,
+        one_time_keyboard: true,
+      },
+    );
+  } catch (err) {
+    console.error("[telegram] linking failed:", err);
+    await sendMessage(chatId, "Couldn't link that right now. Try again in a sec.").catch(() => {});
+  }
+}
+
+async function sendLoginLink(channel: Channel, tenantId: string): Promise<void> {
   try {
     const token = await createLoginToken(tenantId);
     const dash = process.env.DASHBOARD_URL ?? "http://localhost:3100";
-    await sendMessage(
-      chatId,
+    await channel.sendText(
       `Here's your dashboard login link (valid 10 minutes, one-time):\n${dash}/login/confirm?token=${token}`,
     );
   } catch (err) {
-    console.error("[tg] login token failed:", err);
-    await sendMessage(chatId, "Couldn't generate a login link right now. Try again in a sec.");
+    console.error(`[${channel.name}] login token failed:`, err);
+    await channel.sendText("Couldn't generate a login link right now. Try again in a sec.");
   }
 }
 
@@ -410,9 +594,34 @@ const isLoginCommand = (text: string | undefined): boolean => {
   return cmd === "/login" || cmd === "/dashboard" || cmd === "/web";
 };
 
-/** Turn one burst of updates into one agent turn, and deliver the reply. */
+/** Map with at most `limit` calls in flight; results keep input order. */
+async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const out: R[] = new Array(items.length);
+  let next = 0;
+  const worker = async (): Promise<void> => {
+    while (next < items.length) {
+      const i = next++;
+      out[i] = await fn(items[i]!);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return out;
+}
+
+/** Download one photo and make it vision-ready; null on any failure. */
+async function loadPhoto(channel: Channel, media: MediaRef): Promise<VisionImage | null> {
+  try {
+    const file = await channel.fetchMedia(media);
+    return file ? await prepareForVision(file.bytes, file.mimeType) : null;
+  } catch (err) {
+    console.warn(`[${channel.name}] photo load failed:`, err);
+    return null;
+  }
+}
+
+/** Turn one burst of inbound messages into one agent turn, and deliver the reply. */
 async function handleBatch(
-  chatId: number,
+  channel: Channel,
   tenantId: string,
   items: InboxItem[],
 ): Promise<void> {
@@ -420,62 +629,61 @@ async function handleBatch(
     // /login-style commands are answered directly; they never need the agent.
     const turnItems: InboxItem[] = [];
     for (const it of items) {
-      if (isLoginCommand(it.message.text)) await sendLoginLink(chatId, tenantId);
-      else turnItems.push(it);
+      if (isLoginCommand(it.text)) await sendLoginLink(channel, tenantId);
+      else if (linkCommand(it.text)) {
+        // Linking needs Telegram's contact button; elsewhere, point there.
+        await channel.sendText(
+          "Send /link to Sezar on Telegram and tap the button. Then this chat becomes the same Sezar.",
+        );
+      } else turnItems.push(it);
     }
     if (turnItems.length === 0) return;
 
     const texts: string[] = [];
     let wasVoice = false;
     for (const it of turnItems) {
-      const m = it.message;
-      if (m.voice) {
-        const bytes = await downloadFile(m.voice.file_id);
-        if (!bytes) {
-          await sendMessage(chatId, "couldn't grab that voice note — try again?");
-          continue;
-        }
-        try {
-          const spoken = await transcribeVoice(bytes, "ogg");
-          if (spoken) {
-            texts.push(spoken);
-            wasVoice = true;
-          } else {
-            await sendMessage(chatId, "heard mostly silence there — try again?");
-          }
-        } catch (err) {
-          console.error("[tg] asr failed:", err);
-          await sendMessage(chatId, "couldn't make out that voice note — mind typing it?");
-        }
+      if (it.text) texts.push(it.text);
+      if (!it.voice) continue;
+      const file = await channel.fetchMedia(it.voice).catch((err: unknown) => {
+        console.error(`[${channel.name}] voice download failed:`, err);
+        return null;
+      });
+      if (!file) {
+        await channel.sendText("couldn't grab that voice note — try again?");
         continue;
       }
-      const t = (m.text ?? m.caption ?? "").trim();
-      if (t) texts.push(t);
+      try {
+        const spoken = await transcribeVoice(file.bytes, audioFormatFor(file.mimeType));
+        if (spoken) {
+          texts.push(spoken);
+          wasVoice = true;
+        } else {
+          await channel.sendText("heard mostly silence there — try again?");
+        }
+      } catch (err) {
+        console.error(`[${channel.name}] asr failed:`, err);
+        await channel.sendText("couldn't make out that voice note — mind typing it?");
+      }
     }
 
-    // Photos: largest size of each, downloaded in parallel, capped per turn.
-    const photoItems = turnItems.filter((it) => it.message.photo?.length);
-    const analyzed = photoItems.slice(0, MAX_IMAGES_PER_TURN);
-    const photosDropped = photoItems.length - analyzed.length;
-    const downloads = await Promise.all(
-      analyzed.map((it) => {
-        const largest = it.message.photo![it.message.photo!.length - 1]!;
-        return downloadPhotoBase64(largest.file_id);
-      }),
-    );
-    const images = downloads.filter(
-      (d): d is { base64: string; mimeType: string } => d !== null,
-    );
+    // Photos: made vision-ready, capped per turn. Two at a time: decoding a
+    // HEIC holds the full bitmap (a 48MP iPhone photo is ~190MB of RGBA), and
+    // six in parallel would not fit the 1GiB instance.
+    const photoRefs = turnItems.flatMap((it) => it.photos ?? []);
+    const analyzed = photoRefs.slice(0, MAX_IMAGES_PER_TURN);
+    const photosDropped = photoRefs.length - analyzed.length;
+    const downloads = await mapLimit(analyzed, 2, (ref) => loadPhoto(channel, ref));
+    const images = downloads.filter((d): d is VisionImage => d !== null);
     if (images.length < analyzed.length) {
       console.warn(
-        `[tg] ${analyzed.length - images.length} of ${analyzed.length} photo downloads failed`,
+        `[${channel.name}] ${analyzed.length - images.length} of ${analyzed.length} photo downloads failed`,
       );
     }
 
     const text = texts.join("\n");
     if (!text && images.length === 0) {
       if (analyzed.length > 0) {
-        await sendMessage(chatId, "couldn't read that image — try again?");
+        await channel.sendText("couldn't read that image — try again?");
       }
       return;
     }
@@ -493,15 +701,14 @@ async function handleBatch(
     const port = process.env.PORT ?? "8080";
     const envelope = toAgentMessage({
       tenantId,
-      channel: "telegram",
-      externalMessageId: String(turnItems[0]!.update_id),
+      channel: channel.name,
+      externalMessageId: turnItems[0]!.id,
       text,
     });
     const slowNote = setTimeout(() => {
-      void sendMessage(
-        chatId,
-        SLOW_TURN_NOTES[Math.floor(Math.random() * SLOW_TURN_NOTES.length)]!,
-      );
+      void channel
+        .sendText(SLOW_TURN_NOTES[Math.floor(Math.random() * SLOW_TURN_NOTES.length)]!)
+        .catch(() => {});
     }, SLOW_TURN_NOTE_MS);
     let res: Response;
     try {
@@ -540,42 +747,37 @@ async function handleBatch(
           responseChars: errorBody.length,
         }),
       );
-      await sendMessage(chatId, "the model just hiccuped on me — try again in a moment.");
+      await channel.sendText("the model just hiccuped on me — try again in a moment.");
       return; // don't retry LLM failures — user was told
     }
     const data = (await res.json()) as { result?: { reply?: string } };
     const reply = data.result?.reply;
     const runId = res.headers.get("x-flue-run-id") ?? "?";
     if (!reply) {
-      console.error(`[tg] missing result.reply (run ${runId})`);
-      await sendMessage(chatId, "(no reply)");
+      console.error(`[${channel.name}] missing result.reply (run ${runId})`);
+      await channel.sendText("(no reply)");
       return;
     }
     console.log(formatOutboundReplyLog({ tenantId, text: reply, runId }));
 
-    // Poke mechanic: blank-line-separated thoughts become separate bubbles.
-    const parts = reply
-      .split(/\n{2,}/)
-      .map((s) => s.trim())
-      .filter(Boolean)
-      .slice(0, 3);
-    for (let i = 0; i < Math.max(parts.length, 1); i++) {
-      await sendMessage(chatId, parts[i] ?? reply);
-      if (i < parts.length - 1) await sleep(450);
+    const bubbles = toBubbles(reply, channel.maxBubbles);
+    for (let i = 0; i < bubbles.length; i++) {
+      await channel.sendText(bubbles[i]!);
+      if (i < bubbles.length - 1) await sleep(450);
     }
 
     // Spoken in, spoken out: voice notes get a voice reply on top of text.
-    if (wasVoice) {
+    if (wasVoice && channel.sendVoice) {
       try {
         const speech = cleanForSpeech(reply).slice(0, 800);
-        if (speech) await sendVoice(chatId, await synthesize(speech));
+        if (speech) await channel.sendVoice(await synthesize(speech));
       } catch (err) {
-        console.warn("[tg] tts reply failed (text already sent):", err);
+        console.warn(`[${channel.name}] tts reply failed (text already sent):`, err);
       }
     }
   } catch (err) {
-    console.error("[tg] batch failed:", err);
-    await sendMessage(chatId, "Something went wrong on my side. Try again in a moment.").catch(
+    console.error(`[${channel.name}] batch failed:`, err);
+    await channel.sendText("Something went wrong on my side. Try again in a moment.").catch(
       () => {},
     );
   }
