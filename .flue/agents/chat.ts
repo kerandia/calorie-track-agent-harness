@@ -40,6 +40,7 @@ import {
   upsertMealVector,
 } from "../lib/vector.js";
 import { createSessionBox, type SessionBox } from "../lib/box.js";
+import { recordShellCommand, shellCommandKind } from "../lib/metrics.js";
 import { describeImage } from "../lib/vision.js";
 import { redisSessionStore } from "../lib/sessionStore.js";
 import {
@@ -530,6 +531,9 @@ export default async function chat({ init, payload }: FlueContext) {
       cmd: Type.String({ description: "Shell command to execute." }),
     }),
     execute: async (args) => {
+      // Which kind of command (program, and host for fetches) — never the arguments.
+      console.log(JSON.stringify({ evt: "sandbox_cmd", kind: shellCommandKind(args.cmd) }));
+      await recordShellCommand(args.cmd);
       const box = await getBox();
       const run = await box.exec.command(args.cmd);
       return formatRun(run.result ?? "", run.exitCode ?? 0);

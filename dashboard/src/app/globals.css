@@ -529,6 +529,22 @@ a.cal-cell:hover {
   .learned li { flex-direction: column; align-items: flex-start; }
 }
 
+/* ── Admin ── */
+.tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; margin: 6px 0 8px; }
+.tile { display: flex; flex-direction: column; gap: 2px; padding: 14px 16px; border: 1px solid var(--border); border-radius: 14px; background: var(--panel); }
+.tile-v { font-size: 22px; font-weight: 700; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
+.tile-l { font-size: 12.5px; color: var(--muted); }
+.admin-sec { padding: 18px 0; border-top: 1px solid var(--border); }
+.admin-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); column-gap: 32px; }
+.table-wrap { overflow-x: auto; }
+.ret { border-collapse: collapse; font-size: 13.5px; font-variant-numeric: tabular-nums; min-width: 420px; }
+.ret th, .ret td { padding: 7px 12px; text-align: right; border-bottom: 1px solid var(--border-soft); white-space: nowrap; }
+.ret th:first-child, .ret td:first-child { text-align: left; }
+.ret th { font-weight: 600; color: var(--muted); font-size: 12.5px; }
+.kv-list { list-style: none; margin: 0; padding: 0; font-size: 14px; }
+.kv-list li { display: flex; justify-content: space-between; gap: 12px; padding: 7px 0; border-bottom: 1px solid var(--border-soft); }
+.kv-list li span:last-child { color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+
 /* ══ Landing — one calm page (palette and type match Sezar's published pages) ══ */
 .lp {
   --lp-paper: #fbfaf7;
