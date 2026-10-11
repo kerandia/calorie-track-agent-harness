@@ -4,7 +4,7 @@ import "./globals.css";
 export const metadata: Metadata = {
   title: "Sezar — text the agent, keep the record",
   description:
-    "Sezar lives in Telegram. Log meals, make plans, and reopen pages from chat. The dashboard is your record, not another conversation.",
+    "A personal agent in your chat — Telegram, and iMessage by invite. Log meals from a photo, plan around the places you've saved, and keep the record here.",
 };
 
 export default function RootLayout({
