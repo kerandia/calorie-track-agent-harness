@@ -476,6 +476,59 @@ a.cal-cell:hover {
   .pub-actions { width: 100%; padding-left: 0; }
 }
 
+/* ── You ── */
+.you { padding: 18px 0 22px; border-top: 1px solid var(--border); }
+.you:first-of-type { border-top: 0; padding-top: 4px; }
+.you-h {
+  margin: 0 0 12px;
+  font-size: 13px;
+  font-weight: 650;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted-2);
+}
+.facts { margin: 0 0 6px; display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 12px 18px; }
+.facts dt { font-size: 12.5px; color: var(--muted); }
+.facts dd { margin: 2px 0 0; font-weight: 550; line-height: 1.35; }
+.learned, .links { list-style: none; margin: 0; padding: 0; }
+.learned li, .links li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--border-soft);
+}
+.learned li:last-child, .links li:last-child { border-bottom: 0; }
+.learned-text { display: flex; flex-direction: column; gap: 3px; line-height: 1.4; }
+.learned-meta, .page-meta-inline { font-size: 12.5px; color: var(--muted); }
+.learned-actions { display: flex; gap: 8px; flex: none; }
+.chip-btn {
+  display: inline-flex;
+  align-items: center;
+  padding: 7px 13px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--panel);
+  color: var(--text);
+  font: inherit;
+  font-size: 13.5px;
+  font-weight: 550;
+  cursor: pointer;
+}
+.chip-btn:hover { border-color: var(--accent); color: var(--accent); }
+.chip-quiet { color: var(--muted); }
+.you-danger { margin-top: 18px; }
+.you code {
+  padding: 1px 6px;
+  border-radius: 6px;
+  background: var(--panel-2);
+  font-size: 0.92em;
+}
+@media (max-width: 520px) {
+  .learned li { flex-direction: column; align-items: flex-start; }
+}
+
 /* ══ Landing — one calm page (palette and type match Sezar's published pages) ══ */
 .lp {
   --lp-paper: #fbfaf7;

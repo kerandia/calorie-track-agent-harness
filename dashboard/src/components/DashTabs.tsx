@@ -6,6 +6,7 @@ const TABS = [
   { href: "/dashboard", label: "Health" },
   { href: "/dashboard/saved", label: "Saved" },
   { href: "/dashboard/published", label: "Published" },
+  { href: "/dashboard/you", label: "You" },
 ] as const;
 
 export default function DashTabs() {

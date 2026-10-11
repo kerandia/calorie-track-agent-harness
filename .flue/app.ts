@@ -13,6 +13,13 @@ import { imessageChannel, parseImessageWebhook } from "./lib/imessage.js";
 import { toBubbles, type Channel, type ChannelAction } from "./lib/channel.js";
 import { prepareForVision, type VisionImage } from "./lib/images.js";
 import { linkPhone, normalizePhone, tenantForPhone, unlinkPhone } from "./lib/identity.js";
+import {
+  armDeletion,
+  consumeDeletionConfirmation,
+  DELETE_WARNING,
+  deleteTenantData,
+  isDeleteCommand,
+} from "./lib/account.js";
 import { createLoginToken } from "./lib/loginToken.js";
 import { cleanForSpeech, synthesize } from "./lib/fishAudio.js";
 import { audioFormatFor, transcribeVoice } from "./lib/stt.js";
@@ -666,6 +673,23 @@ async function handleBatch(
     // /login-style commands are answered directly; they never need the agent.
     const turnItems: InboxItem[] = [];
     for (const it of items) {
+      // Account erasure: armed by /deletemydata, run only by a standalone
+      // "DELETE" right after. Checked before anything else, by code.
+      if (await consumeDeletionConfirmation(tenantId, it.text)) {
+        const report = await deleteTenantData(tenantId);
+        console.log(JSON.stringify({ evt: "account_deleted", ...report }));
+        await channel.sendText(
+          report.failed
+            ? "Deleted your data. A few published pages or maps couldn't be reached and may still be online — tell me if you want me to retry."
+            : "Done — everything I kept about you is deleted, and your pages and maps are offline. If you message me again, I start fresh.",
+        );
+        return;
+      }
+      if (isDeleteCommand(it.text)) {
+        await armDeletion(tenantId);
+        await channel.sendText(DELETE_WARNING);
+        continue;
+      }
       if (isLoginCommand(it.text)) await sendLoginLink(channel, tenantId);
       else if (linkCommand(it.text)) {
         // Linking needs Telegram's contact button; elsewhere, point there.
