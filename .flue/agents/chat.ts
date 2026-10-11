@@ -2,6 +2,8 @@ import type { FlueContext, ToolDef } from "@flue/runtime";
 import { Type } from "@flue/runtime";
 import * as v from "valibot";
 import { createArtifactCapability } from "../capabilities/artifacts.js";
+import { createPlacesCapability } from "../capabilities/places.js";
+import { createSearchCapability } from "../capabilities/search.js";
 import {
   deleteMealById,
   getActiveAssumptions,
@@ -555,6 +557,8 @@ export default async function chat({ init, payload }: FlueContext) {
     if (!boxRef.current) throw new Error("No sandbox is open; pass HTML directly");
     return boxRef.current.files.read(path);
   });
+  const places = createPlacesCapability(input.tenantId);
+  const search = createSearchCapability();
   const approvalReply = await artifacts.handleApproval(input.text);
   if (approvalReply !== undefined) return { reply: approvalReply };
 
@@ -586,6 +590,8 @@ export default async function chat({ init, payload }: FlueContext) {
       runShellTool,
       runCodeTool,
       ...artifacts.tools,
+      ...places.tools,
+      ...search.tools,
     ],
   });
   const session = await harness.session(input.tenantId);
@@ -626,13 +632,15 @@ export default async function chat({ init, payload }: FlueContext) {
   // strictly "photos from earlier" and this turn's are presented separately.
   let earlierPhotos: PhotoMemory[] = [];
   let recentArtifacts: ArtifactRecord[] = [];
+  let placeListsLine: string | undefined;
   try {
-    [earlierPhotos, recentArtifacts] = await Promise.all([
+    [earlierPhotos, recentArtifacts, placeListsLine] = await Promise.all([
       getRecentPhotos(input.tenantId, 48 * 60 * 60 * 1000, 6),
       listArtifacts(input.tenantId, 5),
+      places.contextLine(),
     ]);
   } catch (err) {
-    console.warn("[chat] photo/artifact memory fetch failed:", err);
+    console.warn("[chat] photo/artifact/place-list memory fetch failed:", err);
   }
   const newPhotoMemories: PhotoMemory[] = visions.flatMap((vis) =>
     vis
@@ -745,6 +753,7 @@ export default async function chat({ init, payload }: FlueContext) {
           .join("\n"),
     );
   }
+  if (placeListsLine) ctx.push(placeListsLine);
   if (input.voice) {
     ctx.push(
       `User sent this as a VOICE note (transcribed). Your reply will also be spoken aloud — keep it extra tight and natural to say.`,

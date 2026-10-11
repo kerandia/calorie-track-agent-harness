@@ -1,10 +1,10 @@
 import { Redis } from "@upstash/redis";
-import type { TgUpdate } from "./telegramApi.js";
 
-// Per-tenant inbox: an ordered Redis list of Telegram updates waiting for an
+// Per-tenant inbox: an ordered Redis list of inbound messages waiting for an
 // agent turn, plus the lock that serializes turns per tenant.
 //
-// The webhook appends here and pings QStash; /tg/process drains the list in
+// A channel's webhook normalizes what arrived into an InboxItem, appends it
+// here and pings QStash; the channel's /process route drains the list in
 // order and coalesces a burst (an album of photos, "here you go" + 4 pics,
 // three rapid texts) into ONE agent turn. Items are peeked, processed, then
 // trimmed — so a hard crash mid-turn leaves them in place for QStash's retry
@@ -16,12 +16,51 @@ const redis = (): Redis => {
   return _redis;
 };
 
+/** A file the channel fetches on demand: a Telegram file_id, an iMessage attachment GUID. */
+export type MediaRef = { ref: string; mimeType?: string };
+
+/** Where the reply to an inbound message goes. */
+export type ReplyRoute =
+  | { channel: "telegram"; chatId: number }
+  | { channel: "imessage"; spaceId: string; phone: string };
+
+/** One inbound message, channel-neutral. */
 export type InboxItem = {
-  update_id: number;
+  /** Channel-native message id (Telegram update_id, Spectrum message id). */
+  id: string;
   /** ms epoch, stamped by the webhook — drives the burst-settling wait. */
   received_at: number;
-  message: NonNullable<TgUpdate["message"]>;
+  /**
+   * The conversation it came from. A linked user's Telegram and iMessage
+   * messages share one inbox (one tenant, one session), so each item carries
+   * its own reply route. Absent only on items queued before routes existed.
+   */
+  via?: ReplyRoute;
+  text?: string;
+  photos?: MediaRef[];
+  voice?: MediaRef;
+  /** Part of an album that arrives one photo at a time: wait longer before acting. */
+  album?: boolean;
 };
+
+export const routeKey = (route: ReplyRoute): string =>
+  route.channel === "telegram" ? `telegram:${route.chatId}` : `imessage:${route.spaceId}`;
+
+/**
+ * The leading items that came from the same conversation — one agent turn's
+ * worth, answered on that conversation's channel. `closed` is true when a
+ * message from another conversation follows, so this run can't grow.
+ */
+export function leadingRun(
+  items: InboxItem[],
+  fallback: ReplyRoute,
+): { route: ReplyRoute; items: InboxItem[]; closed: boolean } {
+  const route = items[0]?.via ?? fallback;
+  const key = routeKey(route);
+  let n = 0;
+  while (n < items.length && routeKey(items[n]!.via ?? fallback) === key) n++;
+  return { route, items: items.slice(0, n), closed: n < items.length };
+}
 
 // A backlog older than this is already a failure; don't let dead keys pile up.
 const INBOX_TTL_S = 60 * 60;
@@ -41,7 +80,7 @@ export async function pushInbox(
   return len;
 }
 
-/** Undo a push whose QStash ping failed (Telegram will redeliver the update). */
+/** Undo a push whose QStash ping failed (the channel will redeliver). */
 export async function removeInboxItem(
   tenantId: string,
   item: InboxItem,

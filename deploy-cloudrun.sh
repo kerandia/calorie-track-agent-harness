@@ -13,6 +13,11 @@
 # webhook with Telegram:
 #   ./deploy-cloudrun.sh set-webhook
 #
+# iMessage (Photon Spectrum), once: register ${SERVICE_URL}/im/webhook with
+# Photon and save its signing secret into .env, then deploy so the service
+# gets SPECTRUM_WEBHOOK_SECRET:
+#   ./deploy-cloudrun.sh imessage-webhook && ./deploy-cloudrun.sh
+#
 # Secrets are read from ./.env at deploy time and pushed as Cloud Run env vars
 # via a temp file in the system tmpdir — nothing secret is written into the repo.
 set -e
@@ -44,6 +49,30 @@ if [ "$1" = "set-webhook" ]; then
   exit 0
 fi
 
+if [ "$1" = "imessage-webhook" ]; then
+  : "${SPECTRUM_PROJECT_ID:?Set SPECTRUM_PROJECT_ID in .env (Photon dashboard -> project Settings)}"
+  : "${SPECTRUM_PROJECT_SECRET:?Set SPECTRUM_PROJECT_SECRET in .env (Photon dashboard -> project Settings)}"
+  if [ -n "${SPECTRUM_WEBHOOK_SECRET:-}" ]; then
+    echo "SPECTRUM_WEBHOOK_SECRET is already in .env. To re-register, delete the old webhook in the Photon dashboard and remove that line first." >&2
+    exit 1
+  fi
+  WEBHOOK_URL="${SERVICE_URL%/}/im/webhook"
+  echo "Registering Photon webhook -> ${WEBHOOK_URL}"
+  RESP="$(curl -sS -X POST "https://spectrum.photon.codes/projects/${SPECTRUM_PROJECT_ID}/webhooks/" \
+    -u "${SPECTRUM_PROJECT_ID}:${SPECTRUM_PROJECT_SECRET}" \
+    -H 'Content-Type: application/json' \
+    -d "{\"webhookUrl\":\"${WEBHOOK_URL}\"}")"
+  # The signing secret is returned only in this response, so it goes straight into .env.
+  SIGNING_SECRET="$(printf '%s' "$RESP" | node -e 'let s="";process.stdin.on("data",(d)=>(s+=d)).on("end",()=>{try{process.stdout.write(JSON.parse(s)?.data?.signingSecret??"")}catch{}})')"
+  if [ -z "$SIGNING_SECRET" ]; then
+    echo "ERROR: Photon webhook registration failed: $RESP" >&2
+    exit 1
+  fi
+  printf '\nSPECTRUM_WEBHOOK_SECRET=%s\n' "$SIGNING_SECRET" >> ./.env
+  echo "Saved SPECTRUM_WEBHOOK_SECRET to .env. Now deploy: ./deploy-cloudrun.sh"
+  exit 0
+fi
+
 ENVFILE="$(mktemp)"
 trap 'rm -f "$ENVFILE"' EXIT
 cat > "$ENVFILE" <<EOF
@@ -68,6 +97,11 @@ FISH_AUDIO_TOKEN: "${FISH_AUDIO_TOKEN}"
 FISH_TTS_MODEL: "${FISH_TTS_MODEL:-s2.1-pro-free}"
 FISH_VOICE_ID: "${FISH_VOICE_ID:-}"
 STT_MODEL: "${STT_MODEL:-x-ai/grok-stt-1.0}"
+SPECTRUM_PROJECT_ID: "${SPECTRUM_PROJECT_ID:-}"
+SPECTRUM_PROJECT_SECRET: "${SPECTRUM_PROJECT_SECRET:-}"
+SPECTRUM_WEBHOOK_SECRET: "${SPECTRUM_WEBHOOK_SECRET:-}"
+GOOGLE_MAPS_API_KEY: "${GOOGLE_MAPS_API_KEY:-}"
+EXA_API_KEY: "${EXA_API_KEY:-}"
 EOF
 
 echo "Deploying '$SERVICE' to Cloud Run ($REGION, scale-to-zero)…"

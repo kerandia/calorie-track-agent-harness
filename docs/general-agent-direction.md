@@ -25,6 +25,10 @@ namespaces, inbox locks, and the dashboard login link.
   boundary; the model only sees ids from it. Publishing, updating and deleting
   are staged and require a standalone `/approve <token>` message from the
   channel-authenticated user, so no model output reaches a public URL on its own.
+- Cross-channel linking by phone number: `/link` in Telegram shares the number
+  through Telegram's contact button (accepted only when `contact.user_id` is
+  the sender's own id), and iMessage from that Apple handle then lands in the
+  same tenant. A number typed in a message is never accepted.
 - One continuous Flue session per tenant (the agent URL's instance id is the
   tenant, not the message id), compacted past ~60k tokens.
 

@@ -66,9 +66,14 @@ export function verifySessionToken(
   secret: string,
 ): string | null {
   if (!token) return null;
+  // Split from the right: tenant ids may contain dots (iMessage email handles,
+  // "im:jane.doe@icloud.com"); the timestamp and signature never do.
   const parts = token.split(".");
-  if (parts.length !== 3) return null;
-  const [tenantId, ts, sig] = parts;
+  if (parts.length < 3) return null;
+  const sig = parts.pop()!;
+  const ts = parts.pop()!;
+  const tenantId = parts.join(".");
+  if (!tenantId) return null;
   const payload = `${tenantId}.${ts}`;
   const expected = sign(payload, secret);
   const a = Buffer.from(sig, "hex");
