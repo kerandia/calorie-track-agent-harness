@@ -13,6 +13,9 @@
 # webhook with Telegram:
 #   ./deploy-cloudrun.sh set-webhook
 #
+# Weekly metrics digest to the admins (Telegram), once:
+#   ./deploy-cloudrun.sh digest-schedule
+#
 # iMessage (Photon Spectrum), once: register ${SERVICE_URL}/im/webhook with
 # Photon and save its signing secret into .env, then deploy so the service
 # gets SPECTRUM_WEBHOOK_SECRET:
@@ -45,6 +48,21 @@ if [ "$1" = "set-webhook" ]; then
   curl -sS "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setWebhook" \
     -H 'Content-Type: application/json' \
     -d "{\"url\":\"${SERVICE_URL}/tg/webhook\",\"secret_token\":\"${TELEGRAM_WEBHOOK_SECRET}\",\"drop_pending_updates\":false,\"allowed_updates\":[\"message\",\"callback_query\"]}"
+  echo ""
+  exit 0
+fi
+
+if [ "$1" = "digest-schedule" ]; then
+  # Monday 09:00 Berlin: QStash calls /internal/digest, which messages the
+  # admins (Redis set `admins`) a week of product metrics. Re-running updates
+  # the same schedule (fixed schedule id) instead of adding a second one.
+  echo "Scheduling the weekly digest -> ${SERVICE_URL%/}/internal/digest"
+  curl -sS -X POST "https://qstash.upstash.io/v2/schedules/${SERVICE_URL%/}/internal/digest" \
+    -H "Authorization: Bearer ${QSTASH_TOKEN}" \
+    -H "Upstash-Cron: CRON_TZ=Europe/Berlin 0 9 * * 1" \
+    -H "Upstash-Schedule-Id: sezar-weekly-digest" \
+    -H "Upstash-Retries: 2" \
+    -H "Upstash-Forward-x-process-secret: ${INTERNAL_API_SECRET}"
   echo ""
   exit 0
 fi

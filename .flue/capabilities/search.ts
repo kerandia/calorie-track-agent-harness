@@ -1,6 +1,7 @@
 import type { ToolDef } from "@flue/runtime";
 import { Type } from "@flue/runtime";
 import { exaConfigured, webSearch, type ExaPlace } from "../lib/exa.js";
+import { recordSpend } from "../lib/metrics.js";
 
 export function createSearchCapability() {
   // ── Live web + place search (Exa) ─────────────────────────────────────────
@@ -44,6 +45,7 @@ export function createSearchCapability() {
       console.log(
         JSON.stringify({ evt: "web_search", places: r.places.length, pages: r.pages.length, costUsd: r.costUsd }),
       );
+      if (r.costUsd) await recordSpend("exa", r.costUsd);
       const out: string[] = [];
       if (r.places.length) {
         out.push(`Places (live, Exa):`, ...r.places.map(placeLine));

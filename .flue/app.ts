@@ -25,6 +25,8 @@ import { cleanForSpeech, synthesize } from "./lib/fishAudio.js";
 import { audioFormatFor, transcribeVoice } from "./lib/stt.js";
 import { MAIN_MODEL_CONTEXT_WINDOW, MAIN_MODEL_ID } from "./lib/models.js";
 import { assertTenantId, toAgentMessage } from "./lib/message.js";
+import { recordError, recordTokens, recordToolCall, recordTurn } from "./lib/metrics.js";
+import { adminChatIds, buildDigest } from "./lib/digest.js";
 import {
   formatInboundMessageLog,
   formatOutboundReplyLog,
@@ -61,6 +63,7 @@ observe((event) => {
           durationMs: e.durationMs,
         }),
       );
+      if (e.isError) void recordError("agent_run");
       return;
     case "turn": {
       const usage = (e.usage ?? {}) as Record<string, unknown>;
@@ -77,6 +80,7 @@ observe((event) => {
           ...(e.error ? { error: String(e.error).slice(0, 200) } : {}),
         }),
       );
+      void recordTokens(Number(usage.input ?? usage.inputTokens ?? 0), Number(usage.output ?? usage.outputTokens ?? 0));
       return;
     }
     case "tool_call": {
@@ -90,6 +94,8 @@ observe((event) => {
           resultChars: toolResultCharCount(e.result),
         }),
       );
+      // "finish" is the harness's own end-of-turn tool, not a feature.
+      if (e.toolName !== "finish") void recordToolCall(String(e.toolName), Boolean(e.isError));
       return;
     }
     default:
@@ -476,6 +482,19 @@ app.post("/im/process", async (c) => {
   );
 });
 
+// Weekly digest. QStash's cron schedule calls this (see deploy-cloudrun.sh
+// digest-schedule) with the same forwarded secret as the /process routes.
+app.post("/internal/digest", async (c) => {
+  if (c.req.header("x-process-secret") !== env("INTERNAL_API_SECRET")) {
+    return c.json({ error: "forbidden" }, 403);
+  }
+  const text = await buildDigest();
+  const chats = await adminChatIds();
+  for (const chatId of chats) await sendMessage(chatId, text);
+  console.log(JSON.stringify({ evt: "digest_sent", admins: chats.length }));
+  return c.json({ ok: true, admins: chats.length });
+});
+
 const channelFor = (route: ReplyRoute): Channel =>
   route.channel === "telegram"
     ? telegramChannel(route.chatId)
@@ -760,6 +779,7 @@ async function handleBatch(
     );
 
     const port = process.env.PORT ?? "8080";
+    const turnStarted = Date.now();
     const envelope = toAgentMessage({
       tenantId,
       channel: channel.name,
@@ -808,6 +828,7 @@ async function handleBatch(
           responseChars: errorBody.length,
         }),
       );
+      await recordError("agent_request");
       await channel.sendText("the model just hiccuped on me — try again in a moment.");
       return; // don't retry LLM failures — user was told
     }
@@ -818,10 +839,18 @@ async function handleBatch(
     const runId = res.headers.get("x-flue-run-id") ?? "?";
     if (!reply) {
       console.error(`[${channel.name}] missing result.reply (run ${runId})`);
+      await recordError("no_reply");
       await channel.sendText("(no reply)");
       return;
     }
     console.log(formatOutboundReplyLog({ tenantId, text: reply, runId }));
+    await recordTurn({
+      tenantId,
+      channel: channel.name,
+      seconds: (Date.now() - turnStarted) / 1000,
+      voice: wasVoice,
+      photos: images.length,
+    });
 
     const bubbles = toBubbles(reply, channel.maxBubbles);
     const approval = data.result?.approval;
@@ -843,6 +872,7 @@ async function handleBatch(
     }
   } catch (err) {
     console.error(`[${channel.name}] batch failed:`, err);
+    await recordError("batch");
     await channel.sendText("Something went wrong on my side. Try again in a moment.").catch(
       () => {},
     );
