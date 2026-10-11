@@ -74,7 +74,17 @@ export function listIdFromMapsUrl(url: URL): string | null {
   return data && LIST_ID.test(data) ? data : null;
 }
 
-export class SharedListError extends Error {}
+export class SharedListError extends Error {
+  constructor(
+    message: string,
+    /** Google is refusing our server for now (429 / 5xx after retries). */
+    readonly rateLimited = false,
+  ) {
+    super(message);
+  }
+}
+
+const RETRY_DELAYS_MS = [2_000, 6_000];
 
 type Fetch = typeof fetch;
 
@@ -198,19 +208,37 @@ export function parseSharedList(body: string): SharedListData {
   };
 }
 
-/** Fetch and parse a shared list by its Google list id. */
-export async function fetchSharedList(listId: string, fetchImpl: Fetch = fetch): Promise<SharedListData> {
+/**
+ * Fetch and parse a shared list by its Google list id. Google rate-limits
+ * this endpoint per source IP (a Cloud Run egress IP gets 429s at times), so
+ * 429 / 5xx are retried briefly here — the model must never improvise its own
+ * waiting or scraping around it.
+ */
+export async function fetchSharedList(
+  listId: string,
+  fetchImpl: Fetch = fetch,
+  sleep: (ms: number) => Promise<void> = (ms) => new Promise((r) => setTimeout(r, ms)),
+): Promise<SharedListData> {
   if (!LIST_ID.test(listId)) throw new SharedListError("Invalid list id");
   const url =
     "https://www.google.com/maps/preview/entitylist/getlist?authuser=0&hl=en&gl=us" +
     `&pb=!1m1!1s${listId}!2e2!3e2!4i${MAX_PLACES}!16b1`;
-  const res = await fetchImpl(url, { signal: AbortSignal.timeout(15_000) });
-  if (!res.ok) {
+  for (let attempt = 0; ; attempt++) {
+    const res = await fetchImpl(url, { signal: AbortSignal.timeout(15_000) });
+    if (res.ok) return parseSharedList(await res.text());
+    const retryable = res.status === 429 || res.status >= 500;
+    if (retryable && attempt < RETRY_DELAYS_MS.length) {
+      await sleep(RETRY_DELAYS_MS[attempt]!);
+      continue;
+    }
+    if (res.status === 404) throw new SharedListError("Google says that list doesn't exist (or isn't shared anymore).");
     throw new SharedListError(
-      res.status === 404 ? "Google says that list doesn't exist (or isn't shared anymore)." : `Google returned ${res.status} for that list.`,
+      retryable
+        ? "Google is temporarily refusing list requests from our server (rate limit)."
+        : `Google returned ${res.status} for that list.`,
+      retryable,
     );
   }
-  return parseSharedList(await res.text());
 }
 
 // ── Links ─────────────────────────────────────────────────────────────────
@@ -306,16 +334,26 @@ export async function deletePlaceList(
 export async function importSharedList(
   tenantId: string,
   link: string,
-  deps: { fetchImpl?: Fetch; db?: PlaceListStore } = {},
-): Promise<{ list: PlaceList; refreshed: boolean; truncated: boolean; unreadable: number }> {
+  deps: { fetchImpl?: Fetch; db?: PlaceListStore; sleep?: (ms: number) => Promise<void> } = {},
+): Promise<{ list: PlaceList; refreshed: boolean; truncated: boolean; unreadable: number; stale?: boolean }> {
   const db = deps.db ?? getRedis();
   const googleId = await resolveSharedListId(link, deps.fetchImpl);
-  const data = await fetchSharedList(googleId, deps.fetchImpl);
 
   const existingSummary = (await listPlaceLists(tenantId, db)).find(
     (s) => s.source?.list_id === googleId,
   );
   const existing = existingSummary ? await getPlaceList(tenantId, existingSummary.id, db) : null;
+
+  let data: SharedListData;
+  try {
+    data = await fetchSharedList(googleId, deps.fetchImpl, deps.sleep);
+  } catch (err) {
+    // Rate-limited but we have this list already: answer from the saved copy.
+    if (err instanceof SharedListError && err.rateLimited && existing) {
+      return { list: existing, refreshed: false, truncated: false, unreadable: 0, stale: true };
+    }
+    throw err;
+  }
   const known = new Map((existing?.places ?? []).map((p) => [p.id, p]));
 
   const now = new Date().toISOString();
@@ -344,4 +382,33 @@ export async function importSharedList(
     db,
   );
   return { list, refreshed: Boolean(existing), truncated: data.hasMore, unreadable: data.unreadable };
+}
+
+/**
+ * Move every place list from one tenant to another (an iMessage account being
+ * joined to the main one). The same imported Google list on both sides keeps
+ * the newer copy. Returns the names that moved.
+ */
+export async function movePlaceLists(
+  fromTenant: string,
+  toTenant: string,
+  db: PlaceListStore = getRedis(),
+): Promise<string[]> {
+  if (fromTenant === toTenant) return [];
+  const [from, to] = await Promise.all([listPlaceLists(fromTenant, db), listPlaceLists(toTenant, db)]);
+  const moved: string[] = [];
+  for (const summary of from) {
+    const list = await getPlaceList(fromTenant, summary.id, db);
+    if (!list) continue;
+    const twin = list.source ? to.find((t) => t.source?.list_id === list.source!.list_id) : undefined;
+    if (twin && twin.updated_at >= list.updated_at) {
+      await deletePlaceList(fromTenant, list.id, db);
+      continue;
+    }
+    if (twin) await deletePlaceList(toTenant, twin.id, db);
+    await savePlaceList(toTenant, list, db);
+    await deletePlaceList(fromTenant, list.id, db);
+    moved.push(list.name);
+  }
+  return moved;
 }

@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { Redis } from "@upstash/redis";
+import { aliasKey } from "./identity.js";
 import { deleteMap } from "./maproom.js";
 import { deletePage } from "./pages.js";
 import { listArtifacts } from "./redis.js";
@@ -108,9 +109,9 @@ export async function deleteTenantData(tenantId: string): Promise<DeletionReport
   const phone = await redis().get<string>(`t:${tenantId}:phone`);
   const keys = await findTenantKeys(tenantId);
   if (phone) {
-    const aliasKey = `ident:phone:${String(phone)}`;
-    const owner = await redis().get<string | number>(aliasKey);
-    if (owner !== null && String(owner) === tenantId) keys.push(aliasKey);
+    const alias = aliasKey(String(phone));
+    const owner = await redis().get<string | number>(alias);
+    if (owner !== null && String(owner) === tenantId) keys.push(alias);
   }
   for (let i = 0; i < keys.length; i += 200) {
     report.keys += await redis().del(...keys.slice(i, i + 200));

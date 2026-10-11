@@ -237,7 +237,8 @@ export async function getLinkedPhone(tenantId: string): Promise<string | null> {
 export async function unlinkPhone(tenantId: string): Promise<void> {
   const phone = await getLinkedPhone(tenantId);
   if (!phone) return;
-  const aliasKey = `ident:phone:${phone}`;
+  // Numbers are keyed by E.164, Apple ID emails by handle (.flue/lib/identity.ts).
+  const aliasKey = phone.includes("@") ? `ident:handle:${phone.toLowerCase()}` : `ident:phone:${phone}`;
   const owner = await redis().get<string | number>(aliasKey);
   const pipe = redis().pipeline();
   pipe.del(k(tenantId, "phone"));

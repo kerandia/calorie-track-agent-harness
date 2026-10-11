@@ -40,7 +40,13 @@ export function createPlacesCapability(tenantId: string) {
     }),
     execute: async (args) => {
       try {
-        const { list, refreshed, truncated, unreadable } = await importSharedList(tenantId, args.url);
+        const { list, refreshed, truncated, unreadable, stale } = await importSharedList(tenantId, args.url);
+        if (stale) {
+          return [
+            `Couldn't refresh "${list.name}": Google is rate-limiting list requests from our server right now. Using the saved copy [${list.id}] from ${(list.source?.imported_at ?? list.updated_at).slice(0, 10)} (${list.places.length} places) — get_place_lists reads it.`,
+            "Answer from that copy and tell the user it may be missing their latest changes; they can resend the link in ~15 minutes to refresh. Don't retry, wait, or fetch the list any other way.",
+          ].join("\n");
+        }
         const noted = list.places.filter((p) => p.note);
         const sample = [...noted, ...list.places.filter((p) => !p.note)].slice(0, 25);
         return [
@@ -54,7 +60,11 @@ export function createPlacesCapability(tenantId: string) {
           .filter(Boolean)
           .join("\n");
       } catch (err) {
-        if (err instanceof SharedListError) return `Couldn't import: ${err.message}`;
+        if (err instanceof SharedListError) {
+          return err.rateLimited
+            ? `Couldn't import: ${err.message} Tell the user to resend the link in ~15 minutes. Don't retry, wait, or fetch the list any other way (no curl, no sandbox).`
+            : `Couldn't import: ${err.message}`;
+        }
         throw err;
       }
     },

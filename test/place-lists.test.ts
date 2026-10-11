@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  fetchSharedList,
   getPlaceList,
   importSharedList,
+  movePlaceLists,
   listIdFromMapsUrl,
   listPlaceLists,
   mapsLinkFor,
@@ -229,4 +231,58 @@ test("Places lookups use the free IDs-only search, then one details call", async
   assert.equal(cidFromMapsUrl(d.mapsUrl), "42");
   assert.deepEqual(d.reviews[0], { rating: 5, when: "a week ago", author: "A. Reviewer", text: "Great octopus" });
   delete process.env.GOOGLE_MAPS_API_KEY;
+});
+
+test("Google rate limits are retried briefly, then reported as such", async () => {
+  const waits: number[] = [];
+  const sleep = async (ms: number) => void waits.push(ms);
+  const statuses = [429, 503, 200];
+  const flaky = (async () => {
+    const status = statuses.shift()!;
+    return status === 200 ? new Response(getlistBody([{ name: "A", cid: "1", lat: 0, lon: 0 }])) : new Response("", { status });
+  }) as typeof fetch;
+  const data = await fetchSharedList(LIST_ID, flaky, sleep);
+  assert.equal(data.places.length, 1);
+  assert.deepEqual(waits, [2000, 6000]);
+
+  const blocked = (async () => new Response("", { status: 429 })) as typeof fetch;
+  await assert.rejects(fetchSharedList(LIST_ID, blocked, sleep), (err: unknown) => err instanceof SharedListError && err.rateLimited);
+});
+
+test("a rate-limited refresh answers from the saved copy instead of failing", async () => {
+  const db = memoryDb();
+  const sleep = async () => {};
+  await importSharedList("t1", "https://maps.app.goo.gl/abc", {
+    db,
+    sleep,
+    fetchImpl: fakeGoogle(getlistBody([{ name: "Taberna X", cid: "42", lat: 1, lon: 2 }])),
+  });
+  const limited = (async (input: string | URL | Request) => {
+    const url = String(input);
+    if (url.startsWith("https://maps.app.goo.gl/")) {
+      return new Response(null, { status: 302, headers: { location: `https://www.google.com/maps/placelists/list/${LIST_ID}` } });
+    }
+    return new Response("", { status: 429 });
+  }) as typeof fetch;
+  const r = await importSharedList("t1", "https://maps.app.goo.gl/abc", { db, sleep, fetchImpl: limited });
+  assert.equal(r.stale, true);
+  assert.equal(r.list.places[0]!.name, "Taberna X");
+  // With nothing saved, the rate limit surfaces.
+  await assert.rejects(importSharedList("t2", "https://maps.app.goo.gl/abc", { db, sleep, fetchImpl: limited }), SharedListError);
+});
+
+test("joining accounts moves lists across, keeping the newer copy of the same Google list", async () => {
+  const db = memoryDb();
+  const now = new Date().toISOString();
+  const mk = (id: string, name: string, listId?: string) => ({
+    id, name, places: [], created_at: now, updated_at: now,
+    ...(listId ? { source: { kind: "google_shared_list" as const, list_id: listId, imported_at: now } } : {}),
+  });
+  await savePlaceList("im:+4915200000000", mk("aaaaaaaaaaaa", "KYOTO", "kyoto"), db);
+  await savePlaceList("im:+4915200000000", mk("bbbbbbbbbbbb", "Old copy", "berlin"), db);
+  await savePlaceList("main", mk("cccccccccccc", "Berlin", "berlin"), db); // saved later → newer
+  const moved = await movePlaceLists("im:+4915200000000", "main", db);
+  assert.deepEqual(moved, ["KYOTO"]);
+  assert.deepEqual((await listPlaceLists("main", db)).map((l) => l.name).sort(), ["Berlin", "KYOTO"]);
+  assert.deepEqual(await listPlaceLists("im:+4915200000000", db), []);
 });

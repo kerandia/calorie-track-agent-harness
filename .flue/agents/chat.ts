@@ -39,8 +39,9 @@ import {
   semanticSearchMeals,
   upsertMealVector,
 } from "../lib/vector.js";
-import { createSessionBox, type SessionBox } from "../lib/box.js";
+import { createSessionBox, shellQuote, type SessionBox } from "../lib/box.js";
 import { recordShellCommand, shellCommandKind } from "../lib/metrics.js";
+import { pickModel, tripBreaker } from "../lib/modelHealth.js";
 import { describeImage } from "../lib/vision.js";
 import { redisSessionStore } from "../lib/sessionStore.js";
 import {
@@ -114,6 +115,17 @@ const formatRun = (output: string, exit: number): string => {
   return trimmed;
 };
 
+/**
+ * Hard ceiling for one turn. Page and map turns legitimately take 2-5 min;
+ * this sits under the pipeline's 480 s wait (app.ts AGENT_TIMEOUT_MS).
+ */
+const TURN_BUDGET_MS = 420_000;
+
+const isTimeout = (err: unknown): boolean => {
+  const e = err as { name?: string; cause?: { name?: string } } | null;
+  return e?.name === "TimeoutError" || e?.cause?.name === "TimeoutError" || (e?.name === "AbortError" && e?.cause?.name === "TimeoutError");
+};
+
 export default async function chat({ init, payload }: FlueContext) {
   const input = v.parse(InputSchema, payload);
   const today = todayUTC();
@@ -121,7 +133,7 @@ export default async function chat({ init, payload }: FlueContext) {
   const boxRef: { current: SessionBox | null } = { current: null };
   const getBox = async (): Promise<SessionBox> => {
     if (!boxRef.current) {
-      console.log(`[chat] creating ephemeral box for ${input.tenantId}`);
+      console.log("[chat] creating ephemeral box");
       boxRef.current = await createSessionBox(input.tenantId);
     }
     return boxRef.current;
@@ -526,7 +538,7 @@ export default async function chat({ init, payload }: FlueContext) {
   const runShellTool: ToolDef = {
     name: "run_shell",
     description:
-      "Run a shell command inside a fresh Linux sandbox (python pre-installed, apk available for installs). Use for one-shot commands like 'pip install pandas', 'curl https://...', 'ls /workspace'. Returns stdout. Non-zero exit codes will be reported. The sandbox persists across tool calls within this turn.",
+      "Run a shell command inside a fresh Linux sandbox (python pre-installed, apk available for installs), e.g. 'pip install pandas' or 'ls /workspace'. Returns stdout; non-zero exit codes are reported; commands are killed after 45 s. The sandbox persists across tool calls within this turn. Not for looking things up: places and current info come from web_search / place_details, Google Maps lists from import_google_maps_list — never curl or scrape Google or other sites those tools cover. Never sleep or wait to retry a rate limit; tell the user instead.",
     parameters: Type.Object({
       cmd: Type.String({ description: "Shell command to execute." }),
     }),
@@ -535,15 +547,20 @@ export default async function chat({ init, payload }: FlueContext) {
       console.log(JSON.stringify({ evt: "sandbox_cmd", kind: shellCommandKind(args.cmd) }));
       await recordShellCommand(args.cmd);
       const box = await getBox();
-      const run = await box.exec.command(args.cmd);
-      return formatRun(run.result ?? "", run.exitCode ?? 0);
+      // A hard cap per command: a model once slept 90-180 s here to wait out
+      // a Google rate limit while the user stared at a typing indicator.
+      const run = await box.exec.command(`timeout 45 sh -c ${shellQuote(args.cmd)}`);
+      const exit = run.exitCode ?? 0;
+      return exit === 124
+        ? `${formatRun(run.result ?? "", exit)}\n(stopped after 45 s — don't retry or wait; do it another way or tell the user)`
+        : formatRun(run.result ?? "", exit);
     },
   };
 
   const runCodeTool: ToolDef = {
     name: "run_code",
     description:
-      "Execute a Python, JS, or TS snippet inside the sandbox. Use for data analysis, computation, parsing, charts, or anything that needs more than a one-liner. Print results to stdout. The sandbox has TENANT_ID env var set; it does NOT have direct DB access — if you need the user's meal data, fetch it first with query_meals/get_daily_totals and pass it into the code as literals. Persists across tool calls within this turn.",
+      "Execute a Python, JS, or TS snippet inside the sandbox. Use for data analysis, computation, parsing, charts, or anything that needs more than a one-liner. Print results to stdout. The sandbox has TENANT_ID env var set; it does NOT have direct DB access — if you need the user's meal data, fetch it first with query_meals/get_daily_totals and pass it into the code as literals. Persists across tool calls within this turn. Never use it to fetch or scrape websites a tool covers, and never sleep to wait out a rate limit.",
     parameters: Type.Object({
       language: Type.Union([
         Type.Literal("python"),
@@ -570,8 +587,10 @@ export default async function chat({ init, payload }: FlueContext) {
   const approvalReply = await artifacts.handleApproval(input.text);
   if (approvalReply !== undefined) return { reply: approvalReply };
 
+  // Nebius normally; the same model on OpenRouter while Nebius is degraded.
+  const model = await pickModel();
   const harness = await init({
-    model: MAIN_MODEL,
+    model,
     // Sezar's persona and standing rules live in .flue/roles/sezar.md and ride
     // in the SYSTEM prompt. They used to be prepended to every user message,
     // so the transcript was ~90% repeated instructions and the model kept
@@ -800,11 +819,23 @@ export default async function chat({ init, payload }: FlueContext) {
       result: v.object({
         reply: v.string(),
       }),
+      // A turn that runs past its budget is stopped, not left running in the
+      // background after the user has been told something went wrong.
+      signal: AbortSignal.timeout(TURN_BUDGET_MS),
     });
     // A draft staged this turn rides along so the channel can attach
     // confirm / cancel buttons to the reply (Telegram).
     const approval = artifacts.pendingApproval();
     return approval ? { ...data, approval } : data;
+  } catch (err) {
+    if (!isTimeout(err)) throw err;
+    console.warn(JSON.stringify({ evt: "turn_budget_exceeded", model, budgetMs: TURN_BUDGET_MS }));
+    // Most overruns are a slow provider: send the next turns elsewhere.
+    if (model === MAIN_MODEL) await tripBreaker("turn_timeout");
+    return {
+      reply:
+        "that took me way too long, so I stopped. ask again and I'll keep it simpler — if it was a list import, it may just be Google being slow; try again in a few minutes.",
+    };
   } finally {
     if (boxRef.current) {
       try {

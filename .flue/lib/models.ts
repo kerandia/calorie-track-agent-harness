@@ -1,5 +1,12 @@
 export const MAIN_MODEL_ID = "zai-org/GLM-5.3-Flash";
 export const MAIN_MODEL = `nebius/${MAIN_MODEL_ID}`;
+
+/**
+ * The same GLM-5.3-Flash served by another provider. Used while Nebius is
+ * degraded (lib/modelHealth.ts): same behaviour, different infrastructure.
+ */
+export const FALLBACK_MODEL_ID = "z-ai/glm-5.3-flash";
+export const FALLBACK_MODEL = `openrouter/${FALLBACK_MODEL_ID}`;
 /** GLM-5.3-Flash's real window (used by Flue for compaction math). */
 export const MAIN_MODEL_CONTEXT_WINDOW = 1_048_576;
 /**
