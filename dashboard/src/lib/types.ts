@@ -64,3 +64,42 @@ export const MEAL_TYPE_LABEL: Record<MealType, string> = {
   lunch: "Lunch",
   dinner: "Dinner",
 };
+
+// ── Place lists (mirrors .flue/lib/placeLists.ts) ──
+
+export type SavedPlace = {
+  id: string;
+  name: string;
+  address?: string;
+  lat?: number;
+  lon?: number;
+  note?: string;
+  cid?: string;
+  place_id?: string;
+  added_at: string;
+};
+
+export type PlaceList = {
+  id: string;
+  name: string;
+  description?: string;
+  source?: { kind: "google_shared_list"; list_id: string; imported_at: string };
+  places: SavedPlace[];
+  created_at: string;
+  updated_at: string;
+};
+
+export type PlaceListSummary = Pick<PlaceList, "id" | "name" | "source" | "updated_at"> & {
+  count: number;
+};
+
+// ── Published pages and maps (mirrors the artifact registry) ──
+
+export type Artifact = {
+  id: string;
+  kind: "page" | "map";
+  title: string;
+  url: string;
+  created_at: string;
+  updated_at: string;
+};

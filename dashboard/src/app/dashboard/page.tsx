@@ -77,13 +77,8 @@ export default async function Dashboard({
   );
 
   return (
-    <div className="container">
-      <div className="header">
-        <h1 className="h1">🍎 Calorie Dashboard</h1>
-        <a className="btn" href="/api/logout">
-          Log out
-        </a>
-      </div>
+    <>
+      <h1 className="page-title">Health</h1>
 
       <div className="panel" style={{ marginBottom: 18 }}>
         <div className="row" style={{ justifyContent: "space-between" }}>
@@ -171,7 +166,7 @@ export default async function Dashboard({
           </p>
         ) : (
           <p className="muted">
-            Profile not complete — finish onboarding in the Telegram chat.
+            Profile not complete — tell Sezar your age, height and weight in the chat.
           </p>
         )}
         {profile.allergies?.length ? (
@@ -199,6 +194,6 @@ export default async function Dashboard({
           </>
         ) : null}
       </div>
-    </div>
+    </>
   );
 }

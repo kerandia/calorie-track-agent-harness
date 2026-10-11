@@ -1,9 +1,12 @@
 import { Redis } from "@upstash/redis";
 import type {
+  Artifact,
   Assumption,
   DayTotals,
   Meal,
   MealType,
+  PlaceList,
+  PlaceListSummary,
   UserProfile,
 } from "./types";
 
@@ -173,6 +176,51 @@ export async function getActiveAssumptions(
         noted_at: r.noted_at ?? "",
       });
     }
+  });
+  return out;
+}
+
+// ── Place lists ─────────────────────────────────────────────────────────────
+// One JSON value per list (t:{tenant}:placelist:{id}) plus an index hash of
+// summaries (t:{tenant}:placelists), as written by .flue/lib/placeLists.ts.
+
+/** Upstash JSON-decodes stored values; tolerate a raw string too. */
+const decode = <T>(v: unknown): T | null =>
+  v === null || v === undefined ? null : typeof v === "string" ? (JSON.parse(v) as T) : (v as T);
+
+export async function getPlaceListSummaries(tenantId: string): Promise<PlaceListSummary[]> {
+  const raw = (await redis().hgetall<Record<string, unknown>>(k(tenantId, "placelists"))) ?? {};
+  return Object.values(raw)
+    .map((v) => decode<PlaceListSummary>(v))
+    .filter((s): s is PlaceListSummary => s !== null)
+    .sort((a, b) => b.updated_at.localeCompare(a.updated_at));
+}
+
+export async function getPlaceList(tenantId: string, id: string): Promise<PlaceList | null> {
+  if (!/^[a-f0-9]{12}$/.test(id)) return null;
+  return decode<PlaceList>(await redis().get(k(tenantId, "placelist", id)));
+}
+
+// ── Published pages and maps ───────────────────────────────────────────────
+
+export async function getArtifacts(tenantId: string, limit = 100): Promise<Artifact[]> {
+  const ids = (await redis().zrange(k(tenantId, "artifacts"), 0, limit - 1, { rev: true })) as string[];
+  if (ids.length === 0) return [];
+  const pipe = redis().pipeline();
+  for (const id of ids) pipe.hgetall(k(tenantId, "artifact", id));
+  const rows = await pipe.exec<(Record<string, string> | null)[]>();
+  const out: Artifact[] = [];
+  ids.forEach((id, i) => {
+    const r = rows[i];
+    if (!r || !r.url || (r.kind !== "page" && r.kind !== "map")) return;
+    out.push({
+      id,
+      kind: r.kind,
+      title: String(r.title ?? "Untitled"),
+      url: String(r.url),
+      created_at: String(r.created_at ?? ""),
+      updated_at: String(r.updated_at ?? r.created_at ?? ""),
+    });
   });
   return out;
 }
