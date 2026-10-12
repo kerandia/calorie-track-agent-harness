@@ -20,6 +20,15 @@ const redis = (): Redis => {
 };
 
 const phoneKey = (e164: string): string => `ident:phone:${e164}`;
+
+/**
+ * The alias key for an iMessage handle: phone numbers by E.164, anything else
+ * (an Apple ID email) lowercased. Linked handles live in t:{tenant}:phone.
+ */
+export const aliasKey = (handle: string): string => {
+  const e164 = normalizePhone(handle);
+  return e164 ? phoneKey(e164) : `ident:handle:${handle.trim().toLowerCase()}`;
+};
 const tenantPhoneKey = (tenantId: string): string => `t:${tenantId}:phone`;
 
 /** Upstash JSON-decodes values, so a numeric Telegram id comes back as a number. */
@@ -46,27 +55,60 @@ export async function tenantForPhone(e164: string): Promise<string | null> {
   return getString(phoneKey(e164));
 }
 
-/** Link a verified number to a tenant, replacing any previous link on either side. */
-export async function linkPhone(e164: string, tenantId: string): Promise<void> {
-  const [previousTenant, previousPhone] = await Promise.all([
-    getString(phoneKey(e164)),
+/** The tenant an iMessage handle (number or email) is linked to, if any. */
+export async function tenantForHandle(handle: string): Promise<string | null> {
+  return getString(aliasKey(handle));
+}
+
+/**
+ * Link a verified handle (E.164 number or Apple ID email) to a tenant,
+ * replacing any previous link on either side: the latest verified owner wins.
+ */
+export async function linkPhone(handle: string, tenantId: string): Promise<void> {
+  const value = normalizePhone(handle) ?? handle.trim().toLowerCase();
+  const [previousTenant, previousHandle] = await Promise.all([
+    getString(aliasKey(value)),
     getString(tenantPhoneKey(tenantId)),
   ]);
   const pipe = redis().pipeline();
   if (previousTenant && previousTenant !== tenantId) pipe.del(tenantPhoneKey(previousTenant));
-  if (previousPhone && previousPhone !== e164) pipe.del(phoneKey(previousPhone));
-  pipe.set(phoneKey(e164), tenantId);
-  pipe.set(tenantPhoneKey(tenantId), e164);
+  if (previousHandle && previousHandle !== value) pipe.del(aliasKey(previousHandle));
+  pipe.set(aliasKey(value), tenantId);
+  pipe.set(tenantPhoneKey(tenantId), value);
   await pipe.exec();
 }
 
 /** Remove the tenant's linked number. Returns the number that was linked. */
 export async function unlinkPhone(tenantId: string): Promise<string | null> {
-  const e164 = await getString(tenantPhoneKey(tenantId));
-  if (!e164) return null;
+  const handle = await getString(tenantPhoneKey(tenantId));
+  if (!handle) return null;
   const pipe = redis().pipeline();
   pipe.del(tenantPhoneKey(tenantId));
-  pipe.del(phoneKey(e164));
+  pipe.del(aliasKey(handle));
   await pipe.exec();
-  return e164;
+  return handle;
+}
+
+// ── Linking from the iMessage side ─────────────────────────────────────────
+// Telegram's contact button only proves the number of the Telegram account,
+// and iMessage may run on another number or an Apple ID email. So: /link on
+// iMessage returns a short code, and /link <code> sent from Telegram — where
+// the sender is authenticated — joins that iMessage handle to the account.
+
+const codeKey = (code: string): string => `link-code:${code}`;
+
+/** A one-time, 10-minute code standing for this iMessage tenant. */
+export async function createLinkCode(fromTenant: string): Promise<string> {
+  for (let i = 0; i < 5; i++) {
+    const code = String(100000 + (crypto.getRandomValues(new Uint32Array(1))[0]! % 900000));
+    if ((await redis().set(codeKey(code), fromTenant, { ex: 600, nx: true })) === "OK") return code;
+  }
+  throw new Error("couldn't allocate a link code");
+}
+
+/** The iMessage tenant a code stood for; null when unknown, used or expired. */
+export async function consumeLinkCode(code: string): Promise<string | null> {
+  if (!/^\d{6}$/.test(code)) return null;
+  const v = await redis().getdel<string | number>(codeKey(code));
+  return v === null || v === undefined ? null : String(v);
 }

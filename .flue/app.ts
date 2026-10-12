@@ -1,6 +1,7 @@
 import { flue, observe, registerProvider } from "@flue/runtime/app";
 import { Hono } from "hono";
 import { Redis } from "@upstash/redis";
+import { Agent as HttpAgent, fetch as undiciFetch } from "undici";
 import {
   answerCallbackQuery,
   clearButtons,
@@ -12,7 +13,15 @@ import {
 import { imessageChannel, parseImessageWebhook } from "./lib/imessage.js";
 import { toBubbles, type Channel, type ChannelAction } from "./lib/channel.js";
 import { prepareForVision, type VisionImage } from "./lib/images.js";
-import { linkPhone, normalizePhone, tenantForPhone, unlinkPhone } from "./lib/identity.js";
+import {
+  consumeLinkCode,
+  createLinkCode,
+  linkPhone,
+  normalizePhone,
+  tenantForHandle,
+  unlinkPhone,
+} from "./lib/identity.js";
+import { movePlaceLists } from "./lib/placeLists.js";
 import {
   armDeletion,
   consumeDeletionConfirmation,
@@ -23,7 +32,8 @@ import {
 import { createLoginToken } from "./lib/loginToken.js";
 import { cleanForSpeech, synthesize } from "./lib/fishAudio.js";
 import { audioFormatFor, transcribeVoice } from "./lib/stt.js";
-import { MAIN_MODEL_CONTEXT_WINDOW, MAIN_MODEL_ID } from "./lib/models.js";
+import { FALLBACK_MODEL_ID, MAIN_MODEL_CONTEXT_WINDOW, MAIN_MODEL_ID } from "./lib/models.js";
+import { noteModelCall } from "./lib/modelHealth.js";
 import { assertTenantId, toAgentMessage } from "./lib/message.js";
 import { recordError, recordTokens, recordToolCall, recordTurn } from "./lib/metrics.js";
 import { adminChatIds, buildDigest } from "./lib/digest.js";
@@ -81,6 +91,7 @@ observe((event) => {
         }),
       );
       void recordTokens(Number(usage.input ?? usage.inputTokens ?? 0), Number(usage.output ?? usage.outputTokens ?? 0));
+      void noteModelCall(String(e.model ?? ""), Number(e.durationMs ?? 0), Boolean(e.isError));
       return;
     }
     case "tool_call": {
@@ -135,6 +146,11 @@ registerProvider("openrouter", {
     },
     "deepseek/deepseek-v4-pro": {
       contextWindow: 1048576,
+      maxTokens: 8000,
+    },
+    // Fallback while Nebius is degraded (lib/modelHealth.ts).
+    [FALLBACK_MODEL_ID]: {
+      contextWindow: MAIN_MODEL_CONTEXT_WINDOW,
       maxTokens: 8000,
     },
   },
@@ -256,6 +272,15 @@ const sleep = (ms: number): Promise<void> =>
 const LOCK_TTL_S = 600;
 const DRAIN_DEADLINE_MS = 60_000;
 const AGENT_TIMEOUT_MS = 480_000;
+// The agent answers the internal call only when the turn is done, so the
+// response headers can take minutes. Node's fetch gives up on headers after
+// 300 s (undici's default), which cut real 5-minute map turns short and left
+// the run going in the background; this waits as long as the turn may run.
+const agentTurnDispatcher = new HttpAgent({
+  headersTimeout: AGENT_TIMEOUT_MS + 5_000,
+  bodyTimeout: AGENT_TIMEOUT_MS + 5_000,
+});
+
 // After this long in one turn, send a short heads-up so the user isn't staring
 // at a typing indicator wondering whether anything is happening.
 const SLOW_TURN_NOTE_MS = 40_000;
@@ -443,9 +468,8 @@ app.post("/im/webhook", async (c) => {
   const delivery = parsed.delivery;
   if (!delivery?.item) return c.json({ ok: true });
 
-  // A number linked from Telegram (/link) lands in that existing account.
-  const e164 = normalizePhone(delivery.handle);
-  const tenantId = (e164 && (await tenantForPhone(e164))) || delivery.tenantId;
+  // A handle linked from Telegram (/link) lands in that existing account.
+  const tenantId = (await tenantForHandle(delivery.handle)) || delivery.tenantId;
   const { spaceId, phone } = delivery;
   // Dedupe: Spectrum delivers at-least-once; the message id is stable across retries.
   const outcome = await acceptInbound(
@@ -578,7 +602,7 @@ async function drainTenant(
 type LinkCommand = "link" | "unlink";
 const linkCommand = (text: string | undefined): LinkCommand | null => {
   const cmd = (text ?? "").trim().toLowerCase();
-  if (cmd === "/link" || cmd === "/imessage") return "link";
+  if (cmd === "/link" || cmd === "/imessage" || /^\/link \d{6}$/.test(cmd)) return "link";
   if (cmd === "/unlink") return "unlink";
   return null;
 };
@@ -604,6 +628,26 @@ async function handleTelegramLinking(msg: NonNullable<TgUpdate["message"]>): Pro
         chatId,
         `Linked ${e164}. Texting me on iMessage from that number now reaches this same Sezar — same meals, profile and memory. Send /unlink to undo.`,
         { remove_keyboard: true },
+      );
+      return;
+    }
+    // /link 123456 — a code minted on iMessage joins that iMessage handle here.
+    const code = /^\/link (\d{6})$/.exec((msg.text ?? "").trim())?.[1];
+    if (code) {
+      const fromTenant = await consumeLinkCode(code);
+      if (!fromTenant || !fromTenant.startsWith("im:")) {
+        await sendMessage(chatId, "That code doesn't work — it may have expired. Send /link on iMessage for a new one.");
+        return;
+      }
+      const handle = fromTenant.slice(3);
+      await linkPhone(handle, tenantId);
+      const moved = await movePlaceLists(fromTenant, tenantId);
+      console.log(JSON.stringify({ evt: "handle_linked", via: "code", movedLists: moved.length }));
+      await sendMessage(
+        chatId,
+        `Linked. iMessage from ${handle} now reaches this same Sezar — same meals, profile and memory.` +
+          (moved.length ? ` Your lists from there came along: ${moved.join(", ")}.` : "") +
+          " Send /unlink to undo.",
       );
       return;
     }
@@ -711,10 +755,15 @@ async function handleBatch(
       }
       if (isLoginCommand(it.text)) await sendLoginLink(channel, tenantId);
       else if (linkCommand(it.text)) {
-        // Linking needs Telegram's contact button; elsewhere, point there.
-        await channel.sendText(
-          "Send /link to Sezar on Telegram and tap the button. Then this chat becomes the same Sezar.",
-        );
+        // On iMessage, hand out a code to redeem in Telegram (the authenticated side).
+        if (tenantId.startsWith("im:")) {
+          const code = await createLinkCode(tenantId);
+          await channel.sendText(
+            `To make this the same Sezar as your Telegram, open Sezar in Telegram and send:\n/link ${code}\n(valid 10 minutes)`,
+          );
+        } else {
+          await channel.sendText("This chat is already linked to your Sezar account.");
+        }
       } else turnItems.push(it);
     }
     if (turnItems.length === 0) return;
@@ -791,14 +840,14 @@ async function handleBatch(
         .sendText(SLOW_TURN_NOTES[Math.floor(Math.random() * SLOW_TURN_NOTES.length)]!)
         .catch(() => {});
     }, SLOW_TURN_NOTE_MS);
-    let res: Response;
+    let res: Awaited<ReturnType<typeof undiciFetch>>;
     try {
       // The URL's <id> segment is Flue's agent INSTANCE id and part of the
       // session storage key. It used to be the Telegram update_id, so every
       // message opened a brand-new session and the bot had no conversation
       // memory at all (45 one-turn sessions for one user). One instance per
       // tenant = one continuous conversation per tenant.
-      res = await fetch(
+      res = await undiciFetch(
         `http://127.0.0.1:${port}/agents/chat/${encodeURIComponent(tenantId)}`,
         {
           method: "POST",
@@ -813,6 +862,7 @@ async function handleBatch(
             photosDropped: photosDropped > 0 ? photosDropped : undefined,
           }),
           signal: AbortSignal.timeout(AGENT_TIMEOUT_MS),
+          dispatcher: agentTurnDispatcher,
         },
       );
     } finally {
