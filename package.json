@@ -13,6 +13,7 @@
     "build": "tsc && flue build --target node",
     "start": "concurrently -n agent,bot \"node --env-file=.env dist/server.mjs\" \"node --env-file=.env dist/index.js\"",
     "test": "tsc --noEmit -p tsconfig.test.json && node --import tsx --test test/*.test.ts",
+    "eval:people": "tsx scripts/eval-people-research.ts",
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.flue.json"
   },
   "dependencies": {

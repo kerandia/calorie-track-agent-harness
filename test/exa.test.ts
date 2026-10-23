@@ -1,6 +1,16 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { parseExaPlaces, webSearch } from "../.flue/lib/exa.js";
+import {
+  PAGE_TEXT_CHARS,
+  PLACES_PAGE_CHARS,
+  SEARCH_HIGHLIGHT_CHARS,
+  SEARCH_RESULTS_DEFAULT,
+  SEARCH_RESULTS_MAX,
+  fetchExaContents,
+  parseExaPlaces,
+  readPage,
+  webSearch,
+} from "../.flue/lib/exa.js";
 
 // Same layout as an Exa Places page (synthetic venues).
 const PLACES_PAGE = `# ramen in Example Town - Exa Places
@@ -94,8 +104,13 @@ test("search fetches the full Places page once and keeps other hits as web resul
   }) as typeof fetch;
 
   const r = await webSearch({ query: "ramen in Example Town", country: "DE", lat: 52.49, lon: 13.39 }, fake);
+  assert.equal(calls[0]!.body.numResults, SEARCH_RESULTS_DEFAULT);
+  assert.equal(calls[0]!.body.category, undefined);
+  assert.deepEqual(calls[0]!.body.contents, { highlights: { maxCharacters: SEARCH_HIGHLIGHT_CHARS } });
   assert.deepEqual(calls[0]!.body.userLocation, { country: "DE", latitude: 52.49, longitude: 13.39 });
+  assert.equal(String(calls[1]!.url).endsWith("/contents"), true);
   assert.deepEqual(calls[1]!.body.urls, ["https://exa.ai/library/places?q=abc"]);
+  assert.deepEqual(calls[1]!.body.text, { maxCharacters: PLACES_PAGE_CHARS });
   assert.equal(r.places.length, 2);
   assert.deepEqual(r.pages, [
     { url: "https://blog.example/ramen", title: "Best ramen", published: "2026-05-01", snippet: "Try Noodle Bar One" },
@@ -111,5 +126,98 @@ test("search fetches the full Places page once and keeps other hits as web resul
   assert.equal(calls.length, 1);
   assert.equal(calls[0]!.body.userLocation, undefined);
   assert.equal(web.places.length, 0);
+  delete process.env.EXA_API_KEY;
+});
+
+test("search asks for more results, keeps a long snippet, and passes a people category", async () => {
+  process.env.EXA_API_KEY = "test-key";
+  const calls: { url: string; body: Record<string, unknown> }[] = [];
+  const blurb = `${"former Chief Software Architect at Beam AI in Berlin. ".repeat(20)}Now co-founder and CTO of Mutagent.`;
+  const fake = (async (input: string | URL | Request, init?: RequestInit) => {
+    calls.push({ url: String(input), body: JSON.parse(String(init?.body)) });
+    return Response.json({
+      results: [{ url: "https://ai.engineer/speakers/example", title: "Speaker", highlights: [blurb] }],
+    });
+  }) as typeof fetch;
+
+  const r = await webSearch({ query: "ex Beam AI founder Berlin", numResults: 100, category: "people" }, fake);
+  assert.equal(calls[0]!.body.numResults, SEARCH_RESULTS_MAX);
+  assert.equal(calls[0]!.body.category, "people");
+  assert.ok((r.pages[0]!.snippet ?? "").includes("Mutagent"));
+  assert.ok((r.pages[0]!.snippet ?? "").length > 400);
+  delete process.env.EXA_API_KEY;
+});
+
+test("an unknown search category is rejected before Exa is called", async () => {
+  process.env.EXA_API_KEY = "test-key";
+  let called = false;
+  const fake = (async () => {
+    called = true;
+    return Response.json({ results: [] });
+  }) as typeof fetch;
+  await assert.rejects(
+    () => webSearch({ query: "x", category: "linkedin" as "people" }, fake),
+    /Unsupported Exa category/,
+  );
+  assert.equal(called, false);
+  delete process.env.EXA_API_KEY;
+});
+
+test("readPage and fetchExaContents share /contents and return the page text", async () => {
+  process.env.EXA_API_KEY = "test-key";
+  const calls: { url: string; body: Record<string, unknown> }[] = [];
+  const fake = (async (input: string | URL | Request, init?: RequestInit) => {
+    calls.push({ url: String(input), body: JSON.parse(String(init?.body)) });
+    return Response.json({
+      results: [
+        {
+          url: "https://ai.engineer/speakers/burak",
+          title: "Burak",
+          text: "CTO of Mutagent. Formerly Chief Software Architect at Beam AI.",
+          publishedDate: "2026-01-02T00:00:00.000Z",
+        },
+      ],
+      costDollars: { total: 0.001 },
+    });
+  }) as typeof fetch;
+
+  const page = await readPage("https://ai.engineer/speakers/burak", fake);
+  assert.equal(String(calls[0]!.url).endsWith("/contents"), true);
+  assert.deepEqual(calls[0]!.body.urls, ["https://ai.engineer/speakers/burak"]);
+  assert.deepEqual(calls[0]!.body.text, { maxCharacters: PAGE_TEXT_CHARS });
+  assert.equal(page.title, "Burak");
+  assert.equal(page.published, "2026-01-02");
+  assert.match(page.text, /Mutagent/);
+  assert.equal(page.costUsd, 0.001);
+
+  calls.length = 0;
+  const many = await fetchExaContents(
+    ["https://mutagent.io/", "https://example.com/team"],
+    { maxCharacters: 1000 },
+    fake,
+  );
+  assert.deepEqual(calls[0]!.body.urls, ["https://mutagent.io/", "https://example.com/team"]);
+  assert.deepEqual(calls[0]!.body.text, { maxCharacters: 1000 });
+  assert.equal(many.pages[0]!.title, "Burak");
+  delete process.env.EXA_API_KEY;
+});
+
+test("a non-OK contents response fails readPage and is ignored for a Places page", async () => {
+  process.env.EXA_API_KEY = "test-key";
+  const deny = (async () => new Response("nope", { status: 403 })) as typeof fetch;
+  await assert.rejects(() => readPage("https://example.com/bio", deny), /Exa \/contents failed \(403\)/);
+
+  const search = (async (input: string | URL | Request) => {
+    if (String(input).endsWith("/search")) {
+      return Response.json({
+        results: [{ url: "https://exa.ai/library/places?q=abc", title: "Places" }],
+        costDollars: { total: 0.007 },
+      });
+    }
+    return new Response("nope", { status: 503 });
+  }) as typeof fetch;
+  const r = await webSearch({ query: "ramen" }, search);
+  assert.equal(r.places.length, 0);
+  assert.equal(r.costUsd, 0.007);
   delete process.env.EXA_API_KEY;
 });

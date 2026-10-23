@@ -1,17 +1,42 @@
-// Exa web search — live results for places ("Exa Places") and the open web.
+// Exa web search — live results for places ("Exa Places"), people, companies,
+// and the open web.
 //
-// One search ($0.007, with query-relevant highlights per result). When Exa
-// answers with one of its Places pages (exa.ai/library/places?q=…), we fetch
-// that page's full text in a second call ($0.001): it holds one markdown
+// One search (with query-relevant highlights per result). When Exa answers
+// with one of its Places pages (exa.ai/library/places?q=…), we fetch that
+// page's full text through the shared contents helper: it holds one markdown
 // section per venue with address + coordinates, rating, hours and recent
 // reviews (no reviewer names), which we parse into compact records. The
 // coordinates go straight onto MapToAgent pins.
 //
-// Queries leave our infrastructure (Exa, US): callers must keep personal and
-// health details out of them.
+// read_page uses the same helper to open an ordinary URL (a bio, a company
+// site, a news article) after search. Public profile previews that show up
+// in search are readable this way; nothing here logs into LinkedIn.
+//
+// Queries and URLs leave our infrastructure (Exa, US): callers must keep
+// personal and health details out of them.
 
 const API = "https://api.exa.ai";
 const PLACES_PAGE = "https://exa.ai/library/places";
+
+/**
+ * Exa search `category` values this app passes through.
+ * Confirmed on the Search API: `people` (professional profiles), `company`,
+ * and `news` are real categories. A general search omits `category` so bios,
+ * startup sites and talks stay in the index — `people` would hide them.
+ */
+export const EXA_SEARCH_CATEGORIES = ["people", "company", "news"] as const;
+export type ExaSearchCategory = (typeof EXA_SEARCH_CATEGORIES)[number];
+
+/** Exa allows up to 100. Cap below that so a research turn stays bounded. */
+export const SEARCH_RESULTS_DEFAULT = 10;
+export const SEARCH_RESULTS_MAX = 25;
+/** Highlight budget per URL. A headline plus a career blurb, not a 300-char clip. */
+export const SEARCH_HIGHLIGHT_CHARS = 2_000;
+/** What we hand the model after joining a result's highlights. */
+export const SEARCH_SNIPPET_CHARS = 2_000;
+/** Page text for read_page. Places pages ask for the full venue list instead. */
+export const PAGE_TEXT_CHARS = 12_000;
+export const PLACES_PAGE_CHARS = 60_000;
 
 export const exaConfigured = (): boolean => Boolean(process.env.EXA_API_KEY);
 
@@ -124,10 +149,109 @@ const headers = (): Record<string, string> => {
   return { "x-api-key": key, "Content-Type": "application/json" };
 };
 
+const clampResults = (n: number | undefined): number => {
+  const requested = n === undefined || !Number.isFinite(n) ? SEARCH_RESULTS_DEFAULT : Math.trunc(n);
+  return Math.min(Math.max(requested, 1), SEARCH_RESULTS_MAX);
+};
+
+const normalizeCategory = (category: string | undefined): ExaSearchCategory | undefined => {
+  if (!category) return undefined;
+  if ((EXA_SEARCH_CATEGORIES as readonly string[]).includes(category)) return category as ExaSearchCategory;
+  throw new Error(`Unsupported Exa category "${category}". Use people, company, or news, or omit it.`);
+};
+
+export type ExaDocument = {
+  url: string;
+  title?: string;
+  text?: string;
+  published?: string;
+};
+
+type ContentsResponse = {
+  results?: { url?: string; title?: string; text?: string; publishedDate?: string }[];
+  costDollars?: { total?: number };
+};
+
+type ContentsOutcome =
+  | { ok: true; pages: ExaDocument[]; costUsd?: number }
+  | { ok: false; error: string };
+
+/** POST /contents. HTTP errors come back as `{ ok: false }`; network errors throw. */
+async function requestContents(
+  urls: string[],
+  opts: { maxCharacters?: number },
+  fetchImpl: Fetch,
+): Promise<ContentsOutcome> {
+  const res = await fetchImpl(`${API}/contents`, {
+    method: "POST",
+    headers: headers(),
+    body: JSON.stringify({
+      urls,
+      text: { maxCharacters: opts.maxCharacters },
+    }),
+    signal: AbortSignal.timeout(20_000),
+  });
+  if (!res.ok) {
+    return { ok: false, error: `Exa /contents failed (${res.status}): ${(await res.text()).slice(0, 200)}` };
+  }
+  const data = (await res.json()) as ContentsResponse;
+  const pages: ExaDocument[] = (data.results ?? []).map((r, i) => ({
+    url: r.url || urls[i] || "",
+    ...(r.title ? { title: r.title } : {}),
+    ...(r.text ? { text: r.text } : {}),
+    ...(r.publishedDate ? { published: r.publishedDate.slice(0, 10) } : {}),
+  }));
+  return { ok: true, pages, ...(data.costDollars?.total !== undefined ? { costUsd: data.costDollars.total } : {}) };
+}
+
+/**
+ * POST /contents. Shared by Places-page enrichment and read_page.
+ * Throws on a non-OK response.
+ */
+export async function fetchExaContents(
+  urls: string[],
+  opts: { maxCharacters?: number } = {},
+  fetchImpl: Fetch = fetch,
+): Promise<{ pages: ExaDocument[]; costUsd?: number }> {
+  const outcome = await requestContents(urls, { maxCharacters: opts.maxCharacters ?? PAGE_TEXT_CHARS }, fetchImpl);
+  if (!outcome.ok) throw new Error(outcome.error);
+  return { pages: outcome.pages, ...(outcome.costUsd !== undefined ? { costUsd: outcome.costUsd } : {}) };
+}
+
+export type ReadPageResult = {
+  url: string;
+  title?: string;
+  text: string;
+  published?: string;
+  costUsd?: number;
+};
+
+/** Open one public URL via Exa /contents and return its text. */
+export async function readPage(url: string, fetchImpl: Fetch = fetch): Promise<ReadPageResult> {
+  const { pages, costUsd } = await fetchExaContents([url], { maxCharacters: PAGE_TEXT_CHARS }, fetchImpl);
+  const page = pages[0];
+  const text = page?.text ?? "";
+  return {
+    url: page?.url || url,
+    ...(page?.title ? { title: page.title } : {}),
+    text: text.length <= PAGE_TEXT_CHARS ? text : `${text.slice(0, PAGE_TEXT_CHARS)}…`,
+    ...(page?.published ? { published: page.published } : {}),
+    ...(costUsd !== undefined ? { costUsd } : {}),
+  };
+}
+
 export async function webSearch(
-  opts: { query: string; country?: string; lat?: number; lon?: number; numResults?: number },
+  opts: {
+    query: string;
+    country?: string;
+    lat?: number;
+    lon?: number;
+    numResults?: number;
+    category?: ExaSearchCategory;
+  },
   fetchImpl: Fetch = fetch,
 ): Promise<WebSearchResult> {
+  const category = normalizeCategory(opts.category);
   const userLocation =
     opts.lat !== undefined && opts.lon !== undefined
       ? { ...(opts.country ? { country: opts.country } : {}), latitude: opts.lat, longitude: opts.lon }
@@ -138,9 +262,10 @@ export async function webSearch(
     body: JSON.stringify({
       query: opts.query,
       type: "auto",
-      numResults: Math.min(Math.max(opts.numResults ?? 6, 1), 10),
+      numResults: clampResults(opts.numResults),
+      ...(category ? { category } : {}),
       ...(userLocation ? { userLocation } : {}),
-      contents: { highlights: { maxCharacters: 300 } },
+      contents: { highlights: { maxCharacters: SEARCH_HIGHLIGHT_CHARS } },
     }),
     signal: AbortSignal.timeout(20_000),
   });
@@ -155,16 +280,12 @@ export async function webSearch(
   const placesHit = results.find((r) => r.url.startsWith(PLACES_PAGE));
   let places: ExaPlace[] = [];
   if (placesHit) {
-    const c = await fetchImpl(`${API}/contents`, {
-      method: "POST",
-      headers: headers(),
-      body: JSON.stringify({ urls: [placesHit.url], text: { maxCharacters: 60_000 } }),
-      signal: AbortSignal.timeout(20_000),
-    });
-    if (c.ok) {
-      const cd = (await c.json()) as { results?: { text?: string }[]; costDollars?: { total?: number } };
-      places = parseExaPlaces(cd.results?.[0]?.text ?? "");
-      if (cost !== undefined && cd.costDollars?.total !== undefined) cost += cd.costDollars.total;
+    // Expanding the Places page is best-effort: a non-OK contents response
+    // leaves the other hits in place. A network failure still throws.
+    const contents = await requestContents([placesHit.url], { maxCharacters: PLACES_PAGE_CHARS }, fetchImpl);
+    if (contents.ok) {
+      places = parseExaPlaces(contents.pages[0]?.text ?? "");
+      if (cost !== undefined && contents.costUsd !== undefined) cost += contents.costUsd;
     }
   }
 
@@ -174,7 +295,9 @@ export async function webSearch(
       url: r.url,
       ...(r.title ? { title: r.title } : {}),
       ...(r.publishedDate ? { published: r.publishedDate.slice(0, 10) } : {}),
-      ...(r.highlights?.length ? { snippet: r.highlights.join(" … ").replace(/\s+/g, " ").slice(0, 400) } : {}),
+      ...(r.highlights?.length
+        ? { snippet: clip(r.highlights.join(" … ").replace(/\s+/g, " "), SEARCH_SNIPPET_CHARS) }
+        : {}),
     }));
   return { places, pages, ...(cost !== undefined ? { costUsd: cost } : {}) };
 }
