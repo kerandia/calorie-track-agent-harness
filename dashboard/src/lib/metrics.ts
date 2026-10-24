@@ -29,6 +29,7 @@ export type Day = {
 
 export const WATCHED_TOOLS = [
   "web_search",
+  "read_page",
   "place_details",
   "travel_times",
   "outdoor_conditions",

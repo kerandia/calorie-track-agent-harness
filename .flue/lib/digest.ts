@@ -27,6 +27,7 @@ export type DayStats = {
 /** Features whose silence is news: shipped, but nobody (or the model) uses them. */
 export const WATCHED_TOOLS = [
   "web_search",
+  "read_page",
   "place_details",
   "travel_times",
   "outdoor_conditions",

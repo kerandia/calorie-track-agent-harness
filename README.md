@@ -79,7 +79,7 @@ Google has no API that reads or writes a user's Maps lists, so `capabilities/pla
 - **Write:** Sezar keeps its own lists (`lib/placeLists.ts`, one JSON value per list plus an index for the per-turn context). Getting a place into Google Maps is a link (`?cid=` or `query_place_id`); the user taps Save. Re-importing a link refreshes the same Sezar list.
 - **Details:** `place_details` resolves a place with the free IDs-only Text Search, then one Place Details call (rating, price, hours, up to 5 Google reviews), and confirms list matches by CID. Only the place id is stored (Google's caching rules), and reviews stay out of maps (EEA terms since Jul 2025).
 - **Taste:** list names and notes feed the assumptions ledger through the persona (`note_assumption`), never Places content.
-- **Discovery:** `web_search` (`capabilities/search.ts`, Exa) replaces recommending venues from model memory. When Exa answers with one of its Places pages, a second call fetches that page and `lib/exa.ts` parses each venue (address and coordinates, rating, hours, recent reviews without reviewer names). About $0.008 a search. Queries leave for Exa, so the persona keeps personal and health details out of them.
+- **Discovery:** `web_search` (`capabilities/search.ts`, Exa) is for venues, people, companies and current facts — not memory. Default 10 results, cap 25, with longer highlights. An optional `category` of `people`, `company` or `news` narrows Exa's index; leaving it unset searches the open web (bios, startup sites, talks). When Exa answers with one of its Places pages, a second call fetches that page and `lib/exa.ts` parses each venue (address and coordinates, rating, hours, recent reviews without reviewer names). `read_page` opens any other result URL through the same Exa `/contents` helper. About $0.008 a search, plus a small contents charge to open a page. Queries leave for Exa, so the persona keeps personal and health details out of them.
 - **Getting there, and what it's like outside:** `capabilities/planning.ts` adds `travel_times` (Routes API route matrix: walk, transit, drive or bike from one place to up to 25) and `outdoor_conditions` (Weather API hourly and daily, plus Air Quality now and over the coming hours, with exercise advice). Air quality is Google's Universal AQI, where higher is better, and every line handed to the model says so. All three APIs sit inside their free monthly caps at this scale.
 
 ### Photos: classify, remember, then act
@@ -175,6 +175,15 @@ curl "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/deleteWebhook"
 ```
 
 For the dashboard: `cd dashboard && cp .env.example .env.local && npm install && npm run dev` (a dev-only login bypass exists at `/api/auth/dev?id=<telegramId>`; production auth is the bot's `/login` magic link).
+
+People-research regression (real GLM-5.3-Flash and Exa, not part of `npm test`):
+
+```bash
+# needs EXA_API_KEY and NEBIUS_API_KEY (or OPENROUTER_API_KEY). A filled-in .env is picked up.
+npm run eval:people
+```
+
+It asks who among Turkish Beam AI alumni started a startup in Berlin, then a second turn that names the person another agent found. Exit 0 is a pass. Exit 2 means the keys aren't set.
 
 ## Deploying
 

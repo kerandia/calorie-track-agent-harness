@@ -538,7 +538,7 @@ export default async function chat({ init, payload }: FlueContext) {
   const runShellTool: ToolDef = {
     name: "run_shell",
     description:
-      "Run a shell command inside a fresh Linux sandbox (python pre-installed, apk available for installs), e.g. 'pip install pandas' or 'ls /workspace'. Returns stdout; non-zero exit codes are reported; commands are killed after 45 s. The sandbox persists across tool calls within this turn. Not for looking things up: places and current info come from web_search / place_details, Google Maps lists from import_google_maps_list — never curl or scrape Google or other sites those tools cover. Never sleep or wait to retry a rate limit; tell the user instead.",
+      "Run a shell command inside a fresh Linux sandbox (python pre-installed, apk available for installs), e.g. 'pip install pandas' or 'ls /workspace'. Returns stdout; non-zero exit codes are reported; commands are killed after 45 s. The sandbox persists across tool calls within this turn. Use it for computation, files and parsing. Don't use it to re-do web_search, read_page, place_details or import_google_maps_list — those already cover places, the open web (including public profile and company pages) and Google Maps lists. Never sleep or wait to retry a rate limit; tell the user instead.",
     parameters: Type.Object({
       cmd: Type.String({ description: "Shell command to execute." }),
     }),
@@ -560,7 +560,7 @@ export default async function chat({ init, payload }: FlueContext) {
   const runCodeTool: ToolDef = {
     name: "run_code",
     description:
-      "Execute a Python, JS, or TS snippet inside the sandbox. Use for data analysis, computation, parsing, charts, or anything that needs more than a one-liner. Print results to stdout. The sandbox has TENANT_ID env var set; it does NOT have direct DB access — if you need the user's meal data, fetch it first with query_meals/get_daily_totals and pass it into the code as literals. Persists across tool calls within this turn. Never use it to fetch or scrape websites a tool covers, and never sleep to wait out a rate limit.",
+      "Execute a Python, JS, or TS snippet inside the sandbox. Use for data analysis, computation, parsing, charts, or anything that needs more than a one-liner. Print results to stdout. The sandbox has TENANT_ID env var set; it does NOT have direct DB access — if you need the user's meal data, fetch it first with query_meals/get_daily_totals and pass it into the code as literals. Persists across tool calls within this turn. Don't use it to re-fetch what web_search, read_page, place_details or import_google_maps_list already cover, and never sleep to wait out a rate limit.",
     parameters: Type.Object({
       language: Type.Union([
         Type.Literal("python"),
