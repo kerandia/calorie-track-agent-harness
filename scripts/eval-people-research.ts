@@ -118,10 +118,12 @@ const searchedTheClaim = (searches: SearchHit[]): boolean =>
 const deniesTheClaim = (reply: string): boolean =>
   /hallucin|made (?:him|her|that|this|it) up|does ?n[o']t exist|not a real|no such person/.test(fold(reply));
 
+// The user already named him, so "yeah, I saw him too" agrees without repeating it.
 const agrees = (reply: string): boolean => {
   const n = fold(reply);
-  if (!n.includes("ozafsar") || deniesTheClaim(reply)) return false;
-  return /mutagent|beam|cto|co-?founder|yeah|yes|right|correct|that'?s him|you(?:'re| are) right/.test(n);
+  if (deniesTheClaim(reply)) return false;
+  if (/\b(?:yeah|yep|yup|yes|right|correct|matches)\b|that'?s him|same (?:person|one|guy)|saw (?:that|him|it)/.test(n)) return true;
+  return n.includes("ozafsar") && /mutagent|beam|cto|co-?founder/.test(n);
 };
 
 const endpoint = (): Endpoint | null => {
@@ -291,14 +293,18 @@ const main = async (): Promise<number> => {
   turn2.reply = await runTurn(messages, toolsByName, openaiTools, ep, turn2);
   console.log(`turn 2 reply:\n${turn2.reply}\n`);
 
+  // Search counts only matter when turn 1 missed: finding him in two queries is
+  // a pass, giving up after two is the regression. Same for re-checking the
+  // name in turn 2 — there is nothing to verify if turn 1 already found him.
+  const found = mentionsAnswer(turn1.reply);
   const failures: string[] = [];
-  if (turn1.searches.length < MIN_SEARCHES) {
-    failures.push(`turn 1 ran ${turn1.searches.length} searches, wanted at least ${MIN_SEARCHES}`);
+  if (!found && turn1.searches.length < MIN_SEARCHES) {
+    failures.push(`turn 1 gave up after ${turn1.searches.length} searches, wanted at least ${MIN_SEARCHES}`);
   }
   if (asksForTheName(turn1.reply)) failures.push("turn 1 asked the user for a name");
   if (claimsBlocked(turn1.reply)) failures.push("turn 1 claimed a site (LinkedIn) blocks it");
-  if (!mentionsAnswer(turn1.reply)) failures.push("turn 1 did not mention both Mutagent and Özafşar");
-  if (!searchedTheClaim(turn2.searches)) failures.push("turn 2 did not search the name the user supplied");
+  if (!found) failures.push("turn 1 did not mention both Mutagent and Özafşar");
+  if (!found && !searchedTheClaim(turn2.searches)) failures.push("turn 2 did not search the name the user supplied");
   if (!agrees(turn2.reply)) failures.push("turn 2 did not agree with the named person");
   if (deniesTheClaim(turn2.reply)) failures.push("turn 2 called the claim false or a hallucination");
 

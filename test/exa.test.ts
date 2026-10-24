@@ -132,18 +132,18 @@ test("search fetches the full Places page once and keeps other hits as web resul
 test("search asks for more results, keeps a long snippet, and passes a people category", async () => {
   process.env.EXA_API_KEY = "test-key";
   const calls: { url: string; body: Record<string, unknown> }[] = [];
-  const blurb = `${"former Chief Software Architect at Beam AI in Berlin. ".repeat(20)}Now co-founder and CTO of Mutagent.`;
+  const blurb = `${"former Chief Software Architect at Example Labs in Berlin. ".repeat(20)}Now co-founder and CTO of Sample Startup.`;
   const fake = (async (input: string | URL | Request, init?: RequestInit) => {
     calls.push({ url: String(input), body: JSON.parse(String(init?.body)) });
     return Response.json({
-      results: [{ url: "https://ai.engineer/speakers/example", title: "Speaker", highlights: [blurb] }],
+      results: [{ url: "https://conf.example/speakers/example", title: "Speaker", highlights: [blurb] }],
     });
   }) as typeof fetch;
 
-  const r = await webSearch({ query: "ex Beam AI founder Berlin", numResults: 100, category: "people" }, fake);
+  const r = await webSearch({ query: "ex Example Labs founder Berlin", numResults: 100, category: "people" }, fake);
   assert.equal(calls[0]!.body.numResults, SEARCH_RESULTS_MAX);
   assert.equal(calls[0]!.body.category, "people");
-  assert.ok((r.pages[0]!.snippet ?? "").includes("Mutagent"));
+  assert.ok((r.pages[0]!.snippet ?? "").includes("Sample Startup"));
   assert.ok((r.pages[0]!.snippet ?? "").length > 400);
   delete process.env.EXA_API_KEY;
 });
@@ -171,9 +171,9 @@ test("readPage and fetchExaContents share /contents and return the page text", a
     return Response.json({
       results: [
         {
-          url: "https://ai.engineer/speakers/burak",
-          title: "Burak",
-          text: "CTO of Mutagent. Formerly Chief Software Architect at Beam AI.",
+          url: "https://conf.example/speakers/jane-doe",
+          title: "Jane Doe",
+          text: "CTO of Sample Startup. Formerly Chief Software Architect at Example Labs.",
           publishedDate: "2026-01-02T00:00:00.000Z",
         },
       ],
@@ -181,24 +181,24 @@ test("readPage and fetchExaContents share /contents and return the page text", a
     });
   }) as typeof fetch;
 
-  const page = await readPage("https://ai.engineer/speakers/burak", fake);
+  const page = await readPage("https://conf.example/speakers/jane-doe", fake);
   assert.equal(String(calls[0]!.url).endsWith("/contents"), true);
-  assert.deepEqual(calls[0]!.body.urls, ["https://ai.engineer/speakers/burak"]);
+  assert.deepEqual(calls[0]!.body.urls, ["https://conf.example/speakers/jane-doe"]);
   assert.deepEqual(calls[0]!.body.text, { maxCharacters: PAGE_TEXT_CHARS });
-  assert.equal(page.title, "Burak");
+  assert.equal(page.title, "Jane Doe");
   assert.equal(page.published, "2026-01-02");
-  assert.match(page.text, /Mutagent/);
+  assert.match(page.text, /Sample Startup/);
   assert.equal(page.costUsd, 0.001);
 
   calls.length = 0;
   const many = await fetchExaContents(
-    ["https://mutagent.io/", "https://example.com/team"],
+    ["https://startup.example/", "https://example.com/team"],
     { maxCharacters: 1000 },
     fake,
   );
-  assert.deepEqual(calls[0]!.body.urls, ["https://mutagent.io/", "https://example.com/team"]);
+  assert.deepEqual(calls[0]!.body.urls, ["https://startup.example/", "https://example.com/team"]);
   assert.deepEqual(calls[0]!.body.text, { maxCharacters: 1000 });
-  assert.equal(many.pages[0]!.title, "Burak");
+  assert.equal(many.pages[0]!.title, "Jane Doe");
   delete process.env.EXA_API_KEY;
 });
 
