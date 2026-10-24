@@ -179,11 +179,11 @@ For the dashboard: `cd dashboard && cp .env.example .env.local && npm install &&
 People-research regression (real GLM-5.3-Flash and Exa, not part of `npm test`):
 
 ```bash
-# needs EXA_API_KEY and NEBIUS_API_KEY (or OPENROUTER_API_KEY). A filled-in .env is picked up.
+# needs EXA_API_KEY, NEBIUS_API_KEY (or OPENROUTER_API_KEY) and the EVAL_PEOPLE_* case. A filled-in .env is picked up.
 npm run eval:people
 ```
 
-It asks who among Turkish Beam AI alumni started a startup in Berlin, then a second turn that names the person another agent found. Exit 0 is a pass. Exit 2 means the keys aren't set.
+Turn 1 asks `EVAL_PEOPLE_QUESTION`, a "who used to work at X and started Y" question. Turn 2 says another agent found `EVAL_PEOPLE_NAME`. `EVAL_PEOPLE_EXPECT` optionally lists terms a correct answer also names. The case names a real person, so it lives in your `.env` and stays out of this public repo. Exit 0 is a pass. Exit 2 means the keys or the case aren't set.
 
 ## Deploying
 

@@ -8,7 +8,15 @@
  * Needs EXA_API_KEY and either NEBIUS_API_KEY (production model) or
  * OPENROUTER_API_KEY (same model, fallback id). A repo-root `.env` is loaded
  * for any of those that are not already set. Exit 0 passes, 1 fails, 2 means
- * the keys are missing.
+ * the keys or the case are missing.
+ *
+ * The case names a real person and this repo is public, so it lives in the
+ * gitignored `.env`, never in this file:
+ *   EVAL_PEOPLE_QUESTION  turn 1, the question as the user asked it
+ *   EVAL_PEOPLE_NAME      who a correct answer finds; turn 2 says
+ *                         "another agent found <name>"
+ *   EVAL_PEOPLE_EXPECT    optional, comma-separated terms turn 1 must also
+ *                         mention (the startup, say)
  *
  * The system prompt is `.flue/roles/sezar.md`. The tools are the real
  * `web_search` and `read_page` from `capabilities/search.ts`. The user text is
@@ -25,9 +33,6 @@ import { createSearchCapability } from "../.flue/capabilities/search.js";
 import { FALLBACK_MODEL_ID, MAIN_MODEL_ID } from "../.flue/lib/models.js";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-
-const QUESTION = "Can you find me the Turkish people worked at beam ai then started a startup in Berlin";
-const PUSHBACK = "another agent found Burak Cemil Özafşar";
 
 const MIN_SEARCHES = 4;
 const MAX_ROUNDS = 16;
@@ -50,6 +55,8 @@ type SearchHit = { query: string; category?: string };
 type TurnTrace = { searches: SearchHit[]; pages: string[]; reply: string };
 
 type Endpoint = { url: string; key: string; model: string; reasoning?: string };
+
+type Case = { question: string; name: string; expect: string[] };
 
 const loadDotEnv = (path: string): void => {
   if (!existsSync(path)) return;
@@ -104,26 +111,40 @@ const claimsBlocked = (reply: string): boolean => {
   return /linkedin/.test(t) && /block|scrap|can(?:not|'t)|won'?t let|not allowed|no access|forbidden|locked/.test(t);
 };
 
-const mentionsAnswer = (reply: string): boolean => {
-  const n = fold(reply);
-  return n.includes("mutagent") && n.includes("ozafsar");
+const loadCase = (): Case | null => {
+  const question = process.env.EVAL_PEOPLE_QUESTION?.trim();
+  const name = process.env.EVAL_PEOPLE_NAME?.trim();
+  if (!question || !name) return null;
+  const expect = (process.env.EVAL_PEOPLE_EXPECT ?? "")
+    .split(",")
+    .map((t) => t.trim())
+    .filter(Boolean);
+  return { question, name, expect };
 };
 
-const searchedTheClaim = (searches: SearchHit[]): boolean =>
+const nameTokens = (c: Case): string[] => fold(c.name).split(/\s+/).filter((t) => t.length >= 3);
+const surname = (c: Case): string => nameTokens(c).at(-1) ?? fold(c.name);
+
+const mentionsAnswer = (reply: string, c: Case): boolean => {
+  const n = fold(reply);
+  return n.includes(surname(c)) && c.expect.every((t) => n.includes(fold(t)));
+};
+
+const searchedTheClaim = (searches: SearchHit[], c: Case): boolean =>
   searches.some((s) => {
     const q = fold(s.query);
-    return q.includes("ozafsar") || q.includes("burak");
+    return nameTokens(c).some((t) => q.includes(t));
   });
 
 const deniesTheClaim = (reply: string): boolean =>
   /hallucin|made (?:him|her|that|this|it) up|does ?n[o']t exist|not a real|no such person/.test(fold(reply));
 
-// The user already named him, so "yeah, I saw him too" agrees without repeating it.
-const agrees = (reply: string): boolean => {
+// The user already named them, so "yeah, I saw them too" agrees without repeating it.
+const agrees = (reply: string, c: Case): boolean => {
   const n = fold(reply);
   if (deniesTheClaim(reply)) return false;
-  if (/\b(?:yeah|yep|yup|yes|right|correct|matches)\b|that'?s him|same (?:person|one|guy)|saw (?:that|him|it)/.test(n)) return true;
-  return n.includes("ozafsar") && /mutagent|beam|cto|co-?founder/.test(n);
+  if (/\b(?:yeah|yep|yup|yes|right|correct|matches)\b|that'?s (?:him|her|them)|same (?:person|one|guy)|saw (?:that|him|her|them|it)/.test(n)) return true;
+  return n.includes(surname(c)) && (/cto|co-?founder/.test(n) || c.expect.some((t) => n.includes(fold(t))));
 };
 
 const endpoint = (): Endpoint | null => {
@@ -253,16 +274,20 @@ const howToRun = (): string =>
     "  EXA_API_KEY=... NEBIUS_API_KEY=... npm run eval:people",
     "",
     "OPENROUTER_API_KEY works in place of NEBIUS_API_KEY (model " + FALLBACK_MODEL_ID + ").",
+    "It also needs EVAL_PEOPLE_QUESTION and EVAL_PEOPLE_NAME (EVAL_PEOPLE_EXPECT is optional).",
+    "The case names a real person, so keep it in .env, not in the repo.",
     "A filled-in .env at the repo root is loaded when those vars are unset.",
   ].join("\n");
 
 const main = async (): Promise<number> => {
   loadDotEnv(resolve(ROOT, ".env"));
   const ep = endpoint();
-  if (!process.env.EXA_API_KEY || !ep) {
+  const c = loadCase();
+  if (!process.env.EXA_API_KEY || !ep || !c) {
     console.log(howToRun());
     return 2;
   }
+  const pushback = `another agent found ${c.name}`;
 
   const role = roleBody(readFileSync(resolve(ROOT, ".flue/roles/sezar.md"), "utf8"));
   const capability = createSearchCapability();
@@ -278,34 +303,34 @@ const main = async (): Promise<number> => {
 
   const messages: ChatMessage[] = [
     { role: "system", content: role },
-    { role: "user", content: contextMessage(QUESTION) },
+    { role: "user", content: contextMessage(c.question) },
   ];
 
   console.log(`model: ${ep.model}`);
-  console.log(`turn 1: ${QUESTION}`);
+  console.log(`turn 1: ${c.question}`);
   const turn1: TurnTrace = { searches: [], pages: [], reply: "" };
   turn1.reply = await runTurn(messages, toolsByName, openaiTools, ep, turn1);
   console.log(`turn 1 reply:\n${turn1.reply}\n`);
 
-  messages.push({ role: "user", content: contextMessage(PUSHBACK) });
-  console.log(`turn 2: ${PUSHBACK}`);
+  messages.push({ role: "user", content: contextMessage(pushback) });
+  console.log(`turn 2: ${pushback}`);
   const turn2: TurnTrace = { searches: [], pages: [], reply: "" };
   turn2.reply = await runTurn(messages, toolsByName, openaiTools, ep, turn2);
   console.log(`turn 2 reply:\n${turn2.reply}\n`);
 
-  // Search counts only matter when turn 1 missed: finding him in two queries is
-  // a pass, giving up after two is the regression. Same for re-checking the
-  // name in turn 2 — there is nothing to verify if turn 1 already found him.
-  const found = mentionsAnswer(turn1.reply);
+  // Search counts only matter when turn 1 missed: finding them in two queries
+  // is a pass, giving up after two is the regression. Same for re-checking the
+  // name in turn 2 — there is nothing to verify if turn 1 already found them.
+  const found = mentionsAnswer(turn1.reply, c);
   const failures: string[] = [];
   if (!found && turn1.searches.length < MIN_SEARCHES) {
     failures.push(`turn 1 gave up after ${turn1.searches.length} searches, wanted at least ${MIN_SEARCHES}`);
   }
   if (asksForTheName(turn1.reply)) failures.push("turn 1 asked the user for a name");
   if (claimsBlocked(turn1.reply)) failures.push("turn 1 claimed a site (LinkedIn) blocks it");
-  if (!found) failures.push("turn 1 did not mention both Mutagent and Özafşar");
-  if (!found && !searchedTheClaim(turn2.searches)) failures.push("turn 2 did not search the name the user supplied");
-  if (!agrees(turn2.reply)) failures.push("turn 2 did not agree with the named person");
+  if (!found) failures.push(`turn 1 did not mention ${[c.name, ...c.expect].join(" and ")}`);
+  if (!found && !searchedTheClaim(turn2.searches, c)) failures.push("turn 2 did not search the name the user supplied");
+  if (!agrees(turn2.reply, c)) failures.push("turn 2 did not agree with the named person");
   if (deniesTheClaim(turn2.reply)) failures.push("turn 2 called the claim false or a hallucination");
 
   const summary = {
