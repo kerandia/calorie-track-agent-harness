@@ -2,13 +2,15 @@
 //
 // The agent stores each page in a public Upstash Blob bucket, but Blob serves
 // every object with `Content-Disposition: attachment`, so its own URL
-// downloads the file. This route streams the same object back as a page.
+// downloads the file. This route serves the same object back as a page.
 //
 // It is model-written HTML on the dashboard's origin, so the response is
 // locked down: the agent already sanitizes pages to an allowlist (no scripts,
 // forms, iframes or remote images), and this CSP allows only the inline
 // <style> of Sezar's page shell — even a sanitizer miss can't run a script,
 // submit a form, load anything or be framed. The session cookie is httpOnly.
+
+import { injectOgPreview } from "../../../../../.flue/lib/ogPreview";
 
 const BLOB_BASE = (process.env.PAGES_BLOB_BASE_URL ?? "https://b2a00fa636ae.blob.upstash.io").replace(/\/+$/, "");
 
@@ -33,7 +35,13 @@ export async function GET(_req: Request, { params }: { params: Promise<{ path: s
   const upstream = await fetch(`${BLOB_BASE}/p/${rel}`, { cache: "no-store" }).catch(() => null);
   if (!upstream?.ok || !upstream.body) return notFound();
 
-  return new Response(upstream.body, {
+  // Share links are opened from chat. The preview tags have to be in this
+  // response, including for pages stored before the shell started emitting
+  // them. The body is the published page (capped at 128 KB); the tags are the
+  // generic Sezar card, not the page title, which can name meals or totals.
+  const html = await upstream.text();
+
+  return new Response(injectOgPreview(html), {
     headers: {
       "Content-Type": "text/html; charset=utf-8",
       "Content-Disposition": "inline",

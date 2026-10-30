@@ -25,6 +25,7 @@
  */
 
 import sanitizeHtml from "sanitize-html";
+import { ogPreviewMetaTags } from "./ogPreview.js";
 
 const ESCAPES: Record<string, string> = {
   "&": "&amp;",
@@ -221,6 +222,7 @@ export function renderPage(input: PageInput): string {
 <meta name="robots" content="noindex, nofollow">
 <meta name="color-scheme" content="light dark">
 <title>${title}</title>
+${ogPreviewMetaTags()}
 <style>${STYLE}</style>
 </head>
 <body>
