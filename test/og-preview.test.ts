@@ -5,7 +5,6 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import test from "node:test";
 import {
-  OG_DESCRIPTION,
   OG_ORIGIN,
   OG_POSTER_PATH,
   OG_POSTER_URL,
@@ -38,16 +37,20 @@ function headOf(html: string): string {
   return html.slice(0, end);
 }
 
-function metaContent(head: string, key: string): string {
+function metas(head: string): Array<{ key: string; content: string }> {
   const tags = head.match(/<meta\b[^>]*>/gi) ?? [];
-  const found: string[] = [];
+  const found: Array<{ key: string; content: string }> = [];
   for (const tag of tags) {
-    const name = tag.match(/\b(?:property|name)=["']([^"']+)["']/i)?.[1]?.toLowerCase();
-    if (name !== key) continue;
+    const key = tag.match(/\b(?:property|name)=["']([^"']+)["']/i)?.[1]?.toLowerCase();
     const content = tag.match(/\bcontent="([^"]*)"/i)?.[1] ?? tag.match(/\bcontent='([^']*)'/i)?.[1];
-    assert.ok(content !== undefined, tag);
-    found.push(decode(content));
+    if (!key || content === undefined) continue;
+    found.push({ key, content: decode(content) });
   }
+  return found;
+}
+
+function metaContent(head: string, key: string): string {
+  const found = metas(head).filter((tag) => tag.key === key).map((tag) => tag.content);
   assert.equal(found.length, 1, `${key} appeared ${found.length} times: ${found.join(" | ")}`);
   return found[0]!;
 }
@@ -112,7 +115,8 @@ test("dashboard login link serves a generic autoplay preview", { timeout: 180_00
     const head = headOf(html);
 
     assert.equal(metaContent(head, "og:title"), OG_TITLE);
-    assert.equal(metaContent(head, "og:description"), OG_DESCRIPTION);
+    assert.equal(OG_TITLE, "Sezar");
+    assert.equal(metas(head).some((tag) => tag.key === "og:description" || tag.key === "twitter:description"), false);
     assert.equal(metaContent(head, "og:image"), OG_POSTER_URL);
     assert.equal(metaContent(head, "og:image:type"), "image/jpeg");
     assert.equal(metaContent(head, "og:image:width"), "1200");
@@ -126,7 +130,7 @@ test("dashboard login link serves a generic autoplay preview", { timeout: 180_00
     assert.equal(new URL(OG_VIDEO_URL).origin, OG_ORIGIN);
     assert.equal(new URL(OG_POSTER_URL).protocol, "https:");
     assert.doesNotMatch(head, new RegExp(TOKEN));
-    assert.doesNotMatch(`${metaContent(head, "og:title")} ${metaContent(head, "og:description")}`, /kcal|token=/i);
+    assert.doesNotMatch(metaContent(head, "og:title"), /kcal|token=|—/);
     assert.match(html, new RegExp(TOKEN));
     assert.match(html, /Tap to open your dashboard/);
 

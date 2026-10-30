@@ -1,7 +1,6 @@
 import type { Metadata } from "next";
 import "./globals.css";
 import {
-  OG_DESCRIPTION,
   OG_ORIGIN,
   OG_POSTER_URL,
   OG_TITLE,
@@ -10,16 +9,16 @@ import {
 
 // Static metadata, resolved into the first HTML chunk. Messages fetches the
 // link with a plain GET and does not run the client bundle, so these tags
-// have to be here rather than injected after hydration. The same tags apply
-// to /login/confirm (the /login link) and to signed-in dashboard pages: the
-// preview stays the generic Sezar card and never includes a token or stats.
+// have to be here rather than injected after hydration. og:title is only
+// "Sezar" and there is no og:description: a long title or description is what
+// made the preview a compact text card. The same tags apply to /login/confirm
+// and to signed-in dashboard pages, and they never include a token or stats.
+// The document <title> stays the longer line for the browser tab.
 export const metadata: Metadata = {
   metadataBase: new URL(OG_ORIGIN),
-  title: OG_TITLE,
-  description: OG_DESCRIPTION,
+  title: "Sezar — text the agent, keep the record",
   openGraph: {
     title: OG_TITLE,
-    description: OG_DESCRIPTION,
     type: "video.other",
     images: [
       {
@@ -43,7 +42,6 @@ export const metadata: Metadata = {
   twitter: {
     card: "summary_large_image",
     title: OG_TITLE,
-    description: OG_DESCRIPTION,
     images: [OG_POSTER_URL],
   },
 };

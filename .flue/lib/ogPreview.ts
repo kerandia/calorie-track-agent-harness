@@ -22,9 +22,13 @@ export const OG_VIDEO_PATH = "/og/A2_grok_inout_key_og.mp4";
 export const OG_POSTER_URL = `${OG_ORIGIN}${OG_POSTER_PATH}`;
 export const OG_VIDEO_URL = `${OG_ORIGIN}${OG_VIDEO_PATH}`;
 
-export const OG_TITLE = "Sezar — text the agent, keep the record";
-export const OG_DESCRIPTION =
-  "A personal agent in your chat — Telegram, and iMessage by invite. Log meals from a photo, plan around the places you've saved, and keep the record here.";
+/**
+ * A long title or description makes Messages use the compact card, where the
+ * words take the bubble and the 1200×630 loop is a thin strip. "Sezar" alone
+ * leaves the video as the main element. No description: a paragraph there
+ * does the same thing, and it must not carry a token or anyone's stats.
+ */
+export const OG_TITLE = "Sezar";
 
 const meta = (attr: "property" | "name", key: string, content: string): string =>
   `<meta ${attr}="${key}" content="${content}">`;
@@ -34,7 +38,6 @@ export function ogPreviewMetaTags(): string {
   return [
     meta("property", "og:type", "video.other"),
     meta("property", "og:title", OG_TITLE),
-    meta("property", "og:description", OG_DESCRIPTION),
     meta("property", "og:image", OG_POSTER_URL),
     meta("property", "og:image:secure_url", OG_POSTER_URL),
     meta("property", "og:image:type", "image/jpeg"),
@@ -47,18 +50,21 @@ export function ogPreviewMetaTags(): string {
     meta("property", "og:video:height", "630"),
     meta("name", "twitter:card", "summary_large_image"),
     meta("name", "twitter:title", OG_TITLE),
-    meta("name", "twitter:description", OG_DESCRIPTION),
     meta("name", "twitter:image", OG_POSTER_URL),
   ].join("\n");
 }
 
+/** Our preview tags, including ones baked in by an older shell (long title). */
+const PREVIEW_META =
+  /<meta\s+(?:property|name)=["'](?:og:(?:type|title|description|image|image:[a-z_]+|video|video:[a-z_]+)|twitter:(?:card|title|description|image))["'][^>]*>\n?/gi;
+
 /**
- * Insert the preview tags into a stored share page that was published before
- * the shell included them. Pages that already have `og:video` are left alone.
+ * Put the current preview tags in a share page. Replaces a previous set, so a
+ * page stored with the long title picks up "Sezar" the next time it is served.
  */
 export function injectOgPreview(html: string): string {
-  if (html.includes('property="og:video"') || html.includes("property='og:video'")) return html;
-  const close = html.indexOf("</head>");
+  const stripped = html.replace(PREVIEW_META, "");
+  const close = stripped.toLowerCase().indexOf("</head>");
   if (close === -1) return html;
-  return `${html.slice(0, close)}${ogPreviewMetaTags()}\n${html.slice(close)}`;
+  return `${stripped.slice(0, close)}${ogPreviewMetaTags()}\n${stripped.slice(close)}`;
 }

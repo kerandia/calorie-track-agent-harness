@@ -91,7 +91,8 @@ test("share pages advertise the generic Sezar video, not the page's own stats", 
     .split("\n")
     .filter((line) => line.includes("og:") || line.includes("twitter:"))
     .join("\n");
-  assert.match(preview, /property="og:title" content="Sezar — text the agent, keep the record"/);
+  assert.match(preview, /property="og:title" content="Sezar"/);
+  assert.doesNotMatch(preview, /og:description|twitter:description/);
   assert.match(head, /property="og:video" content="https:\/\/calorie-track-agent-harness\.vercel\.app\/og\/A2_grok_inout_key_og\.mp4"/);
   assert.match(head, /property="og:video:secure_url"/);
   assert.match(head, /property="og:video:type" content="video\/mp4"/);
@@ -119,6 +120,18 @@ test("a stored share page without preview tags gains them in front of </head>", 
   assert.doesNotMatch(preview, /1840|secret-token/);
   assert.match(html, /<body>1840 kcal secret-token<\/body>/);
   assert.equal(injectOgPreview(html), html);
+
+  const stale =
+    '<!doctype html><html><head><title>1840 kcal</title>' +
+    '<meta property="og:title" content="Sezar — text the agent, keep the record">' +
+    '<meta property="og:description" content="A long paragraph about meals">' +
+    '<meta property="og:video" content="https://calorie-track-agent-harness.vercel.app/og/A2_grok_inout_key_og.mp4">' +
+    "</head><body>1840 kcal</body></html>";
+  const refreshed = injectOgPreview(stale);
+  const refreshedPreview = refreshed.slice(0, refreshed.indexOf("</head>"));
+  assert.match(refreshedPreview, /property="og:title" content="Sezar"/);
+  assert.doesNotMatch(refreshedPreview, /og:description|keep the record|A long paragraph/);
+  assert.equal(refreshed.split('property="og:video"').length, 2);
 });
 
 test("pre-escaped titles are escaped exactly once", () => {
