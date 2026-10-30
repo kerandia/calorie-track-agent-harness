@@ -1,9 +1,10 @@
-import { Spectrum } from "@spectrum-ts/core";
+import { Spectrum, richlink } from "@spectrum-ts/core";
 import { slimEnvelopeSchema, verifySpectrumSignature } from "@spectrum-ts/core/webhook";
 import { imessage } from "@spectrum-ts/imessage";
 import type { Channel } from "./channel.js";
 import type { InboxItem, MediaRef } from "./inbox.js";
 import { assertTenantId } from "./message.js";
+import { isPreviewLink, splitPreviewLinks } from "./previewLinks.js";
 
 // iMessage through Photon Spectrum (managed iMessage lines).
 //
@@ -169,8 +170,20 @@ export function imessageChannel(spaceId: string, phone: string): Channel {
     // Several bubbles within seconds is the burst pattern Apple flags as automated.
     maxBubbles: 1,
     typingRefreshMs: 20_000,
+    // A dashboard or share URL goes out as its own message. Messages uses the
+    // large 1200×630 preview only when the URL is the entire bubble; beside
+    // other text it collapses to the compact card. `richlink` is Photon's
+    // send with enableLinkPreview, so the bubble is the URL and nothing else.
+    // One extra bubble for a link, not a burst: maxBubbles stays 1 for replies.
     sendText: async (text) => {
-      await (await space()).send(text);
+      const parts = splitPreviewLinks(text);
+      const s = await space();
+      for (let i = 0; i < parts.length; i++) {
+        const part = parts[i]!;
+        if (isPreviewLink(part)) await s.send(richlink(part));
+        else await s.send(part);
+        if (i !== parts.length - 1) await new Promise((r) => setTimeout(r, 400));
+      }
     },
     // Typing is cosmetic: never let it fail a turn (or an SDK init error escape).
     sendTyping: async () => {
