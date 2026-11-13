@@ -44,6 +44,52 @@ type Slim = Record<string, unknown>;
 
 const str = (v: unknown): string | undefined => (typeof v === "string" ? v : undefined);
 
+const EXT_MIMES: Record<string, string> = {
+  ".heic": "image/heic",
+  ".heif": "image/heif",
+  ".hif": "image/heif",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".png": "image/png",
+  ".webp": "image/webp",
+  ".gif": "image/gif",
+  ".m4a": "audio/x-m4a",
+  ".mp4": "audio/mp4",
+  ".aac": "audio/aac",
+  ".caf": "audio/x-caf",
+  ".mp3": "audio/mpeg",
+  ".wav": "audio/wav",
+  ".ogg": "audio/ogg",
+  ".opus": "audio/ogg",
+  ".oga": "audio/ogg",
+};
+
+/**
+ * Normalize an iMessage attachment's MIME type, falling back to its filename
+ * extension when macOS `chat.db` reports `application/octet-stream` or empty.
+ * Drops `.pluginPayloadAttachment` link-preview sidecars.
+ */
+export function normalizeAttachmentMime(
+  mimeType: string | undefined,
+  fileName?: string,
+): string | undefined {
+  const lowerName = fileName?.trim().toLowerCase();
+  if (lowerName?.endsWith(".pluginpayloadattachment")) return undefined;
+
+  const clean = mimeType?.split(";")[0]?.trim().toLowerCase() || undefined;
+  if (clean && clean !== "application/octet-stream") {
+    return clean === "image/jpg" ? "image/jpeg" : clean;
+  }
+  if (lowerName) {
+    const dot = lowerName.lastIndexOf(".");
+    if (dot !== -1) {
+      const mapped = EXT_MIMES[lowerName.slice(dot)];
+      if (mapped) return mapped;
+    }
+  }
+  return clean;
+}
+
 /** Fold one content arm into the item being built. */
 function addContent(content: Slim, into: InboxItem): void {
   switch (content.type) {
@@ -59,11 +105,24 @@ function addContent(content: Slim, into: InboxItem): void {
     }
     case "attachment": {
       const ref = str(content.id);
-      const mimeType = str(content.mimeType)?.toLowerCase();
+      const mimeType = normalizeAttachmentMime(str(content.mimeType), str(content.name));
       if (!ref || !mimeType) return;
       const media: MediaRef = { ref, mimeType };
       if (mimeType.startsWith("image/")) (into.photos ??= []).push(media);
       else if (mimeType.startsWith("audio/") && !into.voice) into.voice = media;
+      return;
+    }
+    case "voice": {
+      const ref = str(content.id);
+      if (!ref || into.voice) return;
+      const mimeType =
+        normalizeAttachmentMime(str(content.mimeType), str(content.name)) ?? "audio/x-m4a";
+      into.voice = { ref, mimeType };
+      return;
+    }
+    case "reply": {
+      const inner = content.content;
+      if (inner && typeof inner === "object") addContent(inner as Slim, into);
       return;
     }
     case "group": {
@@ -131,7 +190,7 @@ export async function parseImessageWebhook(input: {
   };
 }
 
-// ── Outbound (SDK) ─────────────────────────────────────────────────────────
+// ── Outbound & attachment download (SDK) ───────────────────────────────────
 
 const env = (name: string): string => {
   const v = process.env[name];
@@ -161,6 +220,74 @@ async function spectrumIm() {
     });
   }
   return imessage(await _app);
+}
+
+export type RemoteAttachmentLike = {
+  name?: string;
+  mimeType?: string;
+  size?: number;
+  read: () => Promise<Uint8Array>;
+};
+
+const ATTACHMENT_RETRY_DELAYS_MS = [500, 1200, 2500];
+
+const isRetryableAttachmentError = (err: unknown): boolean => {
+  const e = err as { code?: unknown; retryable?: unknown } | null;
+  return e?.code === "attachmentNotReady" || e?.retryable === true;
+};
+
+/**
+ * Download an iMessage attachment, waiting briefly if macOS `imtransferagent`
+ * is still pulling the file from CloudKit (`attachmentNotReady`, 0 bytes, or
+ * fewer bytes than `att.size` reports).
+ */
+export async function readImessageAttachment(
+  getAttachment: (guid: string, phone: string) => Promise<RemoteAttachmentLike | undefined | null>,
+  media: MediaRef,
+  phone: string,
+  delaysMs: readonly number[] = ATTACHMENT_RETRY_DELAYS_MS,
+): Promise<{ bytes: Uint8Array; mimeType: string } | null> {
+  let lastPartial: { bytes: Uint8Array; mimeType: string } | null = null;
+
+  for (let attempt = 0; attempt <= delaysMs.length; attempt++) {
+    if (attempt > 0) {
+      await new Promise((r) => setTimeout(r, delaysMs[attempt - 1]!));
+    }
+    let att: RemoteAttachmentLike | undefined | null;
+    try {
+      att = await getAttachment(media.ref, phone);
+    } catch (err) {
+      if (attempt < delaysMs.length && isRetryableAttachmentError(err)) continue;
+      throw err;
+    }
+    if (!att) {
+      if (attempt < delaysMs.length) continue;
+      return lastPartial;
+    }
+
+    let raw: Uint8Array;
+    try {
+      raw = await att.read();
+    } catch (err) {
+      if (attempt < delaysMs.length && isRetryableAttachmentError(err)) continue;
+      throw err;
+    }
+
+    const bytes = new Uint8Array(raw);
+    if (bytes.length === 0) continue;
+
+    const mimeType =
+      normalizeAttachmentMime(att.mimeType, att.name) ??
+      normalizeAttachmentMime(media.mimeType, att.name) ??
+      "";
+    if (typeof att.size === "number" && att.size > 0 && bytes.length < att.size) {
+      lastPartial = { bytes, mimeType };
+      continue;
+    }
+    return { bytes, mimeType };
+  }
+
+  return lastPartial;
 }
 
 export function imessageChannel(spaceId: string, phone: string): Channel {
@@ -197,10 +324,8 @@ export function imessageChannel(spaceId: string, phone: string): Channel {
         .catch(() => {});
     },
     fetchMedia: async (media) => {
-      const att = await (await spectrumIm()).getAttachment(media.ref, phone);
-      if (!att) return null;
-      const bytes = await att.read();
-      return { bytes: new Uint8Array(bytes), mimeType: (att.mimeType ?? media.mimeType ?? "").toLowerCase() };
+      const im = await spectrumIm();
+      return readImessageAttachment((guid, p) => im.getAttachment(guid, p), media, phone);
     },
   };
 }

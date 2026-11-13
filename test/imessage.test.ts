@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
 import test from "node:test";
-import { parseImessageWebhook } from "../.flue/lib/imessage.js";
+import { parseImessageWebhook, readImessageAttachment } from "../.flue/lib/imessage.js";
 
 const SECRET = "test-signing-secret";
 const NOW = Date.parse("2026-10-05T12:00:00Z");
@@ -122,4 +122,90 @@ test("email handles are lowercased into a stable tenant id", async () => {
   );
   assert.ok(r.ok && r.delivery);
   assert.equal(r.delivery.tenantId, "im:jane.doe@icloud.com");
+});
+
+test("inline replies, native voice bubbles, and octet-stream filenames keep their media", async () => {
+  const repliedPhoto = await parseImessageWebhook(
+    signed(
+      delivery({
+        type: "reply",
+        target: { id: "spc-msg-prev", contentPreview: "what did you have?" },
+        content: {
+          type: "attachment",
+          id: "GUID-REPLY-1",
+          name: "IMG_9001.HEIC",
+          mimeType: "application/octet-stream",
+        },
+      }),
+    ),
+  );
+  assert.ok(repliedPhoto.ok && repliedPhoto.delivery?.item);
+  assert.deepEqual(repliedPhoto.delivery.item.photos, [
+    { ref: "GUID-REPLY-1", mimeType: "image/heic" },
+  ]);
+
+  const nativeVoice = await parseImessageWebhook(
+    signed(delivery({ type: "voice", id: "GUID-VOICE-1", mimeType: "audio/x-caf" })),
+  );
+  assert.ok(nativeVoice.ok && nativeVoice.delivery?.item);
+  assert.deepEqual(nativeVoice.delivery.item.voice, {
+    ref: "GUID-VOICE-1",
+    mimeType: "audio/x-caf",
+  });
+
+  const payloadSidecar = await parseImessageWebhook(
+    signed(
+      delivery({
+        type: "attachment",
+        id: "GUID-PAYLOAD",
+        name: "B8F1.pluginPayloadAttachment",
+        mimeType: "image/png",
+      }),
+    ),
+  );
+  assert.ok(payloadSidecar.ok);
+  assert.equal(payloadSidecar.delivery?.item, null);
+});
+
+test("attachment downloads retry until CloudKit transfer finishes and reject zero-byte files", async () => {
+  const fullBytes = Uint8Array.from([1, 2, 3, 4, 5, 6]);
+  let calls = 0;
+  const fetched = await readImessageAttachment(
+    async () => {
+      calls++;
+      if (calls === 1) {
+        throw Object.assign(new Error("still downloading"), { code: "attachmentNotReady" });
+      }
+      if (calls === 2) {
+        return { name: "IMG_1.HEIC", mimeType: "", size: 6, read: async () => new Uint8Array(0) };
+      }
+      if (calls === 3) {
+        return {
+          name: "IMG_1.HEIC",
+          mimeType: "",
+          size: 6,
+          read: async () => fullBytes.subarray(0, 3),
+        };
+      }
+      return { name: "IMG_1.HEIC", mimeType: "", size: 6, read: async () => fullBytes };
+    },
+    { ref: "GUID-1", mimeType: "image/heic" },
+    "shared",
+    [1, 1, 1],
+  );
+  assert.equal(calls, 4);
+  assert.deepEqual(fetched, { bytes: fullBytes, mimeType: "image/heic" });
+
+  const stuckZero = await readImessageAttachment(
+    async () => ({
+      name: "IMG_2.JPG",
+      mimeType: "image/jpeg",
+      size: 100,
+      read: async () => new Uint8Array(0),
+    }),
+    { ref: "GUID-2", mimeType: "image/jpeg" },
+    "shared",
+    [1, 1],
+  );
+  assert.equal(stuckZero, null);
 });

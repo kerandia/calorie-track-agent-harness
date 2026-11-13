@@ -717,13 +717,24 @@ const approvalActions = (a: { token: string; action: string }): ChannelAction[] 
 
 /** Download one photo and make it vision-ready; null on any failure. */
 async function loadPhoto(channel: Channel, media: MediaRef): Promise<VisionImage | null> {
-  try {
-    const file = await channel.fetchMedia(media);
-    return file ? await prepareForVision(file.bytes, file.mimeType) : null;
-  } catch (err) {
-    console.warn(`[${channel.name}] photo load failed:`, err);
-    return null;
+  // On iMessage, `chat.db` can report `totalBytes: 0` while `imtransferagent`
+  // is still writing the file on disk; if decoding spots a truncated container,
+  // wait briefly and re-fetch before giving up.
+  const retries = channel.name === "imessage" ? [800, 2000] : [];
+  for (let attempt = 0; attempt <= retries.length; attempt++) {
+    if (attempt > 0) await sleep(retries[attempt - 1]!);
+    try {
+      const file = await channel.fetchMedia(media);
+      if (!file) continue;
+      return await prepareForVision(file.bytes, file.mimeType);
+    } catch (err) {
+      if (attempt === retries.length) {
+        console.warn(`[${channel.name}] photo load failed:`, err);
+        return null;
+      }
+    }
   }
+  return null;
 }
 
 /** Turn one burst of inbound messages into one agent turn, and deliver the reply. */
