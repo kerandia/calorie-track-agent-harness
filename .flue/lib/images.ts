@@ -1,6 +1,6 @@
 /// <reference path="./libheif-js.d.ts" />
 import jpeg from "jpeg-js";
-import libheif from "libheif-js/wasm-bundle";
+import libheif from "libheif-js/wasm-bundle.js";
 import { PNG } from "pngjs";
 
 // Inbound photos → something the vision models accept, at a sane size.
