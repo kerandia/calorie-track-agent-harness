@@ -1,8 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import jpeg from "jpeg-js";
+import { PNG } from "pngjs";
 import { toBubbles } from "../.flue/lib/channel.js";
-import { downscaleRgba, prepareForVision } from "../.flue/lib/images.js";
+import {
+  downscaleRgba,
+  flattenAlphaToWhite,
+  prepareForVision,
+  sniffImageMime,
+} from "../.flue/lib/images.js";
 import { audioFormatFor } from "../.flue/lib/stt.js";
 import { telegramInboxItem } from "../.flue/lib/telegramApi.js";
 
@@ -74,4 +80,74 @@ test("an oversized JPEG is shrunk to the vision size; a small one passes through
   assert.equal(same?.base64, Buffer.from(small).toString("base64"));
 
   assert.equal(await prepareForVision(small, "video/quicktime"), null);
+});
+
+test("transparent PNG pixels composite onto white instead of turning black", async () => {
+  // Left pixel: dark foreground (10, 10, 10, 255). Right pixel: transparent (0, 0, 0, 0).
+  const png = new PNG({ width: 2, height: 1 });
+  png.data = Buffer.from([10, 10, 10, 255, 0, 0, 0, 0]);
+  const rawPng = new Uint8Array(PNG.sync.write(png));
+
+  const out = await prepareForVision(rawPng, "image/png");
+  assert.ok(out);
+  assert.equal(out.mimeType, "image/jpeg");
+  const decoded = jpeg.decode(Buffer.from(out.base64, "base64"), { useTArray: true });
+  // Left stays dark; right becomes bright white instead of (0, 0, 0) black.
+  assert.ok(decoded.data[0]! < 40);
+  assert.ok(decoded.data[4]! > 220 && decoded.data[5]! > 220 && decoded.data[6]! > 220);
+
+  const flat = flattenAlphaToWhite(Uint8Array.from([20, 40, 60, 0, 10, 20, 30, 255]));
+  assert.deepEqual(Array.from(flat), [255, 255, 255, 255, 10, 20, 30, 255]);
+});
+
+test("opaque small PNGs pass through; oversized PNG screenshots are downscaled", async () => {
+  const smallPng = new PNG({ width: 8, height: 8 });
+  smallPng.data.fill(255);
+  const smallBytes = new Uint8Array(PNG.sync.write(smallPng));
+  const kept = await prepareForVision(smallBytes, "image/png");
+  assert.equal(kept?.mimeType, "image/png");
+  assert.equal(kept?.base64, Buffer.from(smallBytes).toString("base64"));
+
+  const tallPng = new PNG({ width: 400, height: 2400 });
+  tallPng.data.fill(200);
+  for (let i = 3; i < tallPng.data.length; i += 4) tallPng.data[i] = 255;
+  const shrunk = await prepareForVision(new Uint8Array(PNG.sync.write(tallPng)), "image/png");
+  assert.ok(shrunk);
+  assert.equal(shrunk.mimeType, "image/jpeg");
+  const decoded = jpeg.decode(Buffer.from(shrunk.base64, "base64"), { useTArray: true });
+  assert.ok(Math.max(decoded.width, decoded.height) <= 1600);
+});
+
+test("empty or truncated images are rejected instead of sent blank", async () => {
+  assert.equal(await prepareForVision(new Uint8Array(0), "image/jpeg"), null);
+  assert.equal(await prepareForVision(new Uint8Array(0), "image/png"), null);
+
+  const validJpeg = jpeg.encode({ data: new Uint8Array(16 * 16 * 4).fill(180), width: 16, height: 16 }, 80).data;
+  const truncatedJpeg = validJpeg.subarray(0, validJpeg.length - 4);
+  await assert.rejects(() => prepareForVision(truncatedJpeg, "image/jpeg"), /Truncated/i);
+
+  const png = new PNG({ width: 16, height: 16 });
+  png.data.fill(180);
+  const validPng = new Uint8Array(PNG.sync.write(png));
+  const truncatedPng = validPng.subarray(0, Math.floor(validPng.length / 2));
+  await assert.rejects(() => prepareForVision(truncatedPng, "image/png"));
+});
+
+test("magic bytes override mislabeled iMessage MIME headers", async () => {
+  const jpg = jpeg.encode({ data: new Uint8Array(8 * 8 * 4).fill(200), width: 8, height: 8 }, 80).data;
+  const fromHeicLabel = await prepareForVision(jpg, "image/heic");
+  assert.equal(fromHeicLabel?.mimeType, "image/jpeg");
+  const fromOctet = await prepareForVision(jpg, "application/octet-stream");
+  assert.equal(fromOctet?.mimeType, "image/jpeg");
+
+  // iOS 18 adaptive-HDR 52-byte ftyp (heic + tmap) and mif3 mini-box ftyp sniff as HEIC; QuickTime mov does not.
+  const ios18Ftyp = Buffer.from(
+    "\x00\x00\x00\x24ftypheic\x00\x00\x00\x00mif1miafMiHBtmapheic",
+    "latin1",
+  );
+  assert.equal(sniffImageMime(ios18Ftyp, "image/jpeg"), "image/heic");
+  const mif3Ftyp = Buffer.from("\x00\x00\x00\x14ftypmif3\x00\x00\x00\x00heic", "latin1");
+  assert.equal(sniffImageMime(mif3Ftyp, "application/octet-stream"), "image/heic");
+  const movFtyp = Buffer.from("\x00\x00\x00\x14ftypqt  \x00\x00\x00\x00qt  ", "latin1");
+  assert.equal(sniffImageMime(movFtyp, "image/heic"), null);
 });
