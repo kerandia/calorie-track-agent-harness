@@ -1,3 +1,4 @@
+import { cafToOgg, isCaf } from "./caf.js";
 import { transcribe as fishTranscribe } from "./fishAudio.js";
 
 // Speech-to-text with a provider chain:
@@ -7,7 +8,8 @@ import { transcribe as fishTranscribe } from "./fishAudio.js";
 //   2. Fish Audio ASR as fallback (needs Fish API credit)
 // Telegram voice notes are OGG/Opus — "ogg" is an accepted format value on
 // OpenRouter's endpoint (verified in their multimodal STT docs). iMessage
-// voice memos arrive as AAC in an MP4 container (audio/mp4, audio/x-m4a).
+// voice memos are Opus inside Apple's CAF container, which OpenRouter rejects
+// (400), so sttAudio re-wraps them as Ogg first (see caf.ts).
 
 const AUDIO_FORMATS: Record<string, string> = {
   "audio/ogg": "ogg",
@@ -19,12 +21,24 @@ const AUDIO_FORMATS: Record<string, string> = {
   "audio/mpeg": "mp3",
   "audio/wav": "wav",
   "audio/x-wav": "wav",
-  "audio/x-caf": "caf",
 };
 
 /** The `format` value transcribeVoice expects for a voice note's MIME type. */
 export const audioFormatFor = (mimeType: string | undefined): string =>
   AUDIO_FORMATS[(mimeType ?? "").toLowerCase().split(";")[0]!.trim()] ?? "ogg";
+
+/**
+ * A voice note's bytes and `format`, in a container the STT endpoints accept.
+ * CAF is recognised by its magic bytes (iMessage labels vary) and re-wrapped
+ * as Ogg; throws if the CAF holds a codec we can't re-wrap (pre-iOS 12.2 AMR).
+ */
+export function sttAudio(
+  bytes: Uint8Array,
+  mimeType: string | undefined,
+): { audio: Uint8Array; format: string } {
+  if (isCaf(bytes)) return { audio: cafToOgg(bytes), format: "ogg" };
+  return { audio: bytes, format: audioFormatFor(mimeType) };
+}
 
 export async function transcribeVoice(
   audio: Uint8Array,
