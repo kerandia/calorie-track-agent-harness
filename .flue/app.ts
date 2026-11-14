@@ -31,7 +31,7 @@ import {
 } from "./lib/account.js";
 import { createLoginToken } from "./lib/loginToken.js";
 import { cleanForSpeech, synthesize } from "./lib/fishAudio.js";
-import { audioFormatFor, transcribeVoice } from "./lib/stt.js";
+import { sttAudio, transcribeVoice } from "./lib/stt.js";
 import { FALLBACK_MODEL_ID, MAIN_MODEL_CONTEXT_WINDOW, MAIN_MODEL_ID } from "./lib/models.js";
 import { noteModelCall } from "./lib/modelHealth.js";
 import { assertTenantId, toAgentMessage } from "./lib/message.js";
@@ -793,7 +793,8 @@ async function handleBatch(
         continue;
       }
       try {
-        const spoken = await transcribeVoice(file.bytes, audioFormatFor(file.mimeType));
+        const { audio, format } = sttAudio(file.bytes, file.mimeType);
+        const spoken = await transcribeVoice(audio, format);
         if (spoken) {
           texts.push(spoken);
           wasVoice = true;
